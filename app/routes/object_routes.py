@@ -1,3 +1,4 @@
+from datetime import datetime
 from flask import Blueprint, jsonify, request
 from app.models.db import db, get_db_connection, get_mongo_collection
 
@@ -747,3 +748,59 @@ def find_topoinstnode_host_serviceinst_count(biz_id):
         import traceback
         traceback.print_exc()
         return make_response(result=False, code=500, message=str(e))
+
+
+@object_bp.route('/api/v3/create/instance/object/<obj_id>', methods=['POST'])
+@object_bp.route('/create/instance/object/<obj_id>', methods=['POST'])
+def create_instance(obj_id):
+    """创建对象实例"""
+    try:
+        req_data = {}
+        if request.is_json:
+            req_data = request.get_json() or {}
+        elif request.form:
+            req_data = request.form.to_dict()
+        elif request.data:
+            try:
+                import json
+                req_data = json.loads(request.data)
+            except:
+                req_data = {}
+        
+        # 获取实例数据
+        instance_data = req_data
+        
+        # 过滤掉None值，但保留空字符串和0
+        instance_data = {k: v for k, v in instance_data.items() if v is not None}
+        
+        # 获取下一个实例ID
+        collection_name = f"cc_InstBase_{obj_id}"
+        collection = get_mongo_collection(collection_name)
+        
+        # 获取当前最大ID
+        max_doc = collection.find_one(sort=[("bk_inst_id", -1)])
+        next_id = 1 if max_doc is None else max_doc.get("bk_inst_id", 0) + 1
+        
+        # 设置实例ID和基础字段
+        instance_data["bk_inst_id"] = next_id
+        instance_data.setdefault("bk_supplier_account", "0")
+        instance_data.setdefault("bk_data_status", "active")
+        instance_data.setdefault("create_time", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+        instance_data.setdefault("last_time", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+        
+        # 插入数据库
+        result = collection.insert_one(instance_data)
+        
+        if result.inserted_id:
+            return make_response(data={
+                "bk_inst_id": next_id,
+                "id": next_id
+            })
+        else:
+            return make_response(result=False, code=500, message="创建实例失败")
+            
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return make_response(result=False, code=500, message=str(e))
+
