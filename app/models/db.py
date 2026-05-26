@@ -2639,7 +2639,119 @@ INIT_DATA = {
             "last_time": "2024-01-01 00:00:00"
         }
     ],
-    "auth_policies": []
+    "auth_policies": [],
+    "cc_HostBase": [
+        {
+            "bk_host_id": 1,
+            "bk_supplier_account": "0",
+            "bk_cloud_id": 0,
+            "bk_host_innerip": "192.168.1.101",
+            "bk_host_outerip": "",
+            "bk_host_name": "web-server-01",
+            "bk_os_name": "CentOS 7.9",
+            "bk_os_type": "1",
+            "bk_comment": "Web服务器01",
+            "bk_operator": "admin",
+            "bk_bak_operator": "admin",
+            "bk_asset_id": "ASSET-2024001",
+            "bk_sn": "SN2024001001",
+            "bk_cpu": "8",
+            "bk_cpu_mhz": "2500",
+            "bk_disk": "500",
+            "bk_mem": "16384",
+            "bk_data_status": "active",
+            "create_time": "2024-01-15 10:00:00",
+            "last_time": "2024-01-15 10:00:00"
+        },
+        {
+            "bk_host_id": 2,
+            "bk_supplier_account": "0",
+            "bk_cloud_id": 0,
+            "bk_host_innerip": "192.168.1.102",
+            "bk_host_outerip": "10.0.0.102",
+            "bk_host_name": "app-server-01",
+            "bk_os_name": "Ubuntu 22.04",
+            "bk_os_type": "1",
+            "bk_comment": "应用服务器01",
+            "bk_operator": "admin",
+            "bk_bak_operator": "admin",
+            "bk_asset_id": "ASSET-2024002",
+            "bk_sn": "SN2024001002",
+            "bk_cpu": "16",
+            "bk_cpu_mhz": "3000",
+            "bk_disk": "1000",
+            "bk_mem": "32768",
+            "bk_data_status": "active",
+            "create_time": "2024-01-16 11:00:00",
+            "last_time": "2024-01-16 11:00:00"
+        },
+        {
+            "bk_host_id": 3,
+            "bk_supplier_account": "0",
+            "bk_cloud_id": 0,
+            "bk_host_innerip": "192.168.1.103",
+            "bk_host_outerip": "",
+            "bk_host_name": "db-server-01",
+            "bk_os_name": "CentOS 7.9",
+            "bk_os_type": "1",
+            "bk_comment": "数据库服务器01",
+            "bk_operator": "admin",
+            "bk_bak_operator": "admin",
+            "bk_asset_id": "ASSET-2024003",
+            "bk_sn": "SN2024001003",
+            "bk_cpu": "32",
+            "bk_cpu_mhz": "2800",
+            "bk_disk": "2000",
+            "bk_mem": "65536",
+            "bk_data_status": "active",
+            "create_time": "2024-01-17 12:00:00",
+            "last_time": "2024-01-17 12:00:00"
+        },
+        {
+            "bk_host_id": 4,
+            "bk_supplier_account": "0",
+            "bk_cloud_id": 0,
+            "bk_host_innerip": "192.168.1.104",
+            "bk_host_outerip": "10.0.0.104",
+            "bk_host_name": "cache-server-01",
+            "bk_os_name": "Ubuntu 22.04",
+            "bk_os_type": "1",
+            "bk_comment": "缓存服务器01",
+            "bk_operator": "admin",
+            "bk_bak_operator": "admin",
+            "bk_asset_id": "ASSET-2024004",
+            "bk_sn": "SN2024001004",
+            "bk_cpu": "8",
+            "bk_cpu_mhz": "2500",
+            "bk_disk": "500",
+            "bk_mem": "32768",
+            "bk_data_status": "active",
+            "create_time": "2024-01-18 13:00:00",
+            "last_time": "2024-01-18 13:00:00"
+        },
+        {
+            "bk_host_id": 5,
+            "bk_supplier_account": "0",
+            "bk_cloud_id": 0,
+            "bk_host_innerip": "192.168.1.105",
+            "bk_host_outerip": "",
+            "bk_host_name": "storage-server-01",
+            "bk_os_name": "CentOS 7.9",
+            "bk_os_type": "1",
+            "bk_comment": "存储服务器01",
+            "bk_operator": "admin",
+            "bk_bak_operator": "admin",
+            "bk_asset_id": "ASSET-2024005",
+            "bk_sn": "SN2024001005",
+            "bk_cpu": "16",
+            "bk_cpu_mhz": "2600",
+            "bk_disk": "8000",
+            "bk_mem": "32768",
+            "bk_data_status": "active",
+            "create_time": "2024-01-19 14:00:00",
+            "last_time": "2024-01-19 14:00:00"
+        }
+    ]
 }
 
 def get_db():
@@ -2659,6 +2771,8 @@ def init_mock_data():
                 conn[collection].update_one({"_id": doc["_id"]}, {"$set": doc}, upsert=True)
             elif "bk_biz_id" in doc:
                 conn[collection].update_one({"bk_biz_id": doc["bk_biz_id"]}, {"$set": doc}, upsert=True)
+            elif "bk_host_id" in doc:
+                conn[collection].update_one({"bk_host_id": doc["bk_host_id"]}, {"$set": doc}, upsert=True)
             elif "bk_cloud_id" in doc:
                 conn[collection].update_one({"bk_cloud_id": doc["bk_cloud_id"]}, {"$set": doc}, upsert=True)
             elif "username" in doc:

@@ -518,12 +518,26 @@ def search_instances_by_obj(obj_id):
         sort = page.get('sort', 'bk_inst_id')
         
         try:
-            collection_name = f"cc_InstBase_{obj_id}"
-            collection = get_mongo_collection(collection_name)
+            if obj_id == 'biz':
+                collection_name = 'cc_ApplicationBase'
+                query = conditions if conditions else {"bk_data_status": {"$ne": "disabled"}}
+            elif obj_id == 'set':
+                collection_name = 'cc_SetBase'
+                query = conditions if conditions else {}
+            elif obj_id == 'module':
+                collection_name = 'cc_ModuleBase'
+                query = conditions if conditions else {}
+            elif obj_id == 'host':
+                collection_name = 'cc_HostBase'
+                query = conditions if conditions else {}
+            elif obj_id == 'cloud_area':
+                collection_name = 'cc_PlatBase'
+                query = conditions if conditions else {}
+            else:
+                collection_name = f"cc_InstBase_{obj_id}"
+                query = conditions if conditions else {}
             
-            query = {}
-            if conditions:
-                query = conditions
+            collection = get_mongo_collection(collection_name)
             
             cursor = collection.find(query)
             
