@@ -1987,6 +1987,18 @@ INIT_DATA = {
     ],
     "cc_ApplicationBase": [
         {
+            "bk_biz_id": 1,
+            "bk_biz_name": "资源池",
+            "bk_supplier_account": "0",
+            "operator": "admin",
+            "bk_maintainer": "admin",
+            "time_zone": "Asia/Shanghai",
+            "create_time": "2024-01-01 00:00:00",
+            "last_time": "2024-01-01 00:00:00",
+            "bk_data_status": "enabled",
+            "bk_default": 1
+        },
+        {
             "bk_biz_id": 2,
             "bk_biz_name": "蓝鲸",
             "bk_supplier_account": "0",
@@ -2087,6 +2099,20 @@ INIT_DATA = {
             "create_time": "2024-01-02 14:00:00",
             "last_time": "2024-01-02 14:00:00",
             "bk_data_status": "enabled"
+        },
+        {
+            "bk_set_id": 5,
+            "bk_set_name": "资源池",
+            "bk_biz_id": 1,
+            "bk_supplier_account": "0",
+            "bk_parent_id": 0,
+            "bk_parent_obj": "biz",
+            "description": "资源池集群",
+            "bk_service_status": "1",
+            "bk_set_env": "3",
+            "create_time": "2024-01-01 00:00:00",
+            "last_time": "2024-01-01 00:00:00",
+            "bk_data_status": "enabled"
         }
     ],
     "cc_ModuleBase": [
@@ -2186,6 +2212,51 @@ INIT_DATA = {
             "bk_service_template_id": 7,
             "create_time": "2024-01-02 14:35:00",
             "last_time": "2024-01-02 14:35:00",
+            "bk_data_status": "enabled"
+        },
+        {
+            "bk_module_id": 8,
+            "bk_module_name": "空闲机",
+            "bk_set_id": 5,
+            "bk_biz_id": 1,
+            "bk_supplier_account": "0",
+            "bk_parent_id": 5,
+            "bk_parent_obj": "set",
+            "bk_service_category_id": 0,
+            "bk_service_template_id": 0,
+            "bk_default": 1,
+            "create_time": "2024-01-01 00:00:00",
+            "last_time": "2024-01-01 00:00:00",
+            "bk_data_status": "enabled"
+        },
+        {
+            "bk_module_id": 9,
+            "bk_module_name": "资源目录1",
+            "bk_set_id": 5,
+            "bk_biz_id": 1,
+            "bk_supplier_account": "0",
+            "bk_parent_id": 5,
+            "bk_parent_obj": "set",
+            "bk_service_category_id": 0,
+            "bk_service_template_id": 0,
+            "bk_default": 2,
+            "create_time": "2024-01-01 00:00:00",
+            "last_time": "2024-01-01 00:00:00",
+            "bk_data_status": "enabled"
+        },
+        {
+            "bk_module_id": 10,
+            "bk_module_name": "资源目录2",
+            "bk_set_id": 5,
+            "bk_biz_id": 1,
+            "bk_supplier_account": "0",
+            "bk_parent_id": 5,
+            "bk_parent_obj": "set",
+            "bk_service_category_id": 0,
+            "bk_service_template_id": 0,
+            "bk_default": 2,
+            "create_time": "2024-01-01 00:00:00",
+            "last_time": "2024-01-01 00:00:00",
             "bk_data_status": "enabled"
         }
     ],
@@ -2769,6 +2840,10 @@ def init_mock_data():
         for doc in documents:
             if "_id" in doc:
                 conn[collection].update_one({"_id": doc["_id"]}, {"$set": doc}, upsert=True)
+            elif "bk_module_id" in doc:
+                conn[collection].update_one({"bk_module_id": doc["bk_module_id"]}, {"$set": doc}, upsert=True)
+            elif "bk_set_id" in doc:
+                conn[collection].update_one({"bk_set_id": doc["bk_set_id"]}, {"$set": doc}, upsert=True)
             elif "bk_biz_id" in doc:
                 conn[collection].update_one({"bk_biz_id": doc["bk_biz_id"]}, {"$set": doc}, upsert=True)
             elif "bk_host_id" in doc:

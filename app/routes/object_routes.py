@@ -896,3 +896,119 @@ def find_business_topo_inst(bk_biz_id):
         traceback.print_exc()
         return make_response(result=False, code=500, message=str(e))
 
+
+@object_bp.route('/api/v3/findmany/resource/directory', methods=['POST'])
+@object_bp.route('/findmany/resource/directory', methods=['POST'])
+def findmany_resource_directory():
+    """搜索资源目录"""
+    try:
+        from app.models.db import get_db_connection
+        conn = get_db_connection()
+        if conn is None:
+            return make_response(result=False, code=500, message="数据库连接失败")
+
+        req_data = {}
+        if request.is_json:
+            req_data = request.get_json() or {}
+        elif request.form:
+            req_data = request.form.to_dict()
+        elif request.data:
+            try:
+                import json
+                req_data = json.loads(request.data)
+            except:
+                req_data = {}
+
+        # 获取资源池相关ID
+        # 查找默认业务（资源池业务 bk_default = 1）
+        resource_pool_biz = conn.cc_ApplicationBase.find_one({"bk_default": 1})
+        if not resource_pool_biz:
+            resource_pool_biz = conn.cc_ApplicationBase.find_one({"bk_biz_id": {"$ne": None}})
+        
+        if not resource_pool_biz:
+            return make_response(data={"count": 0, "info": []})
+        
+        biz_id = resource_pool_biz.get("bk_biz_id")
+        
+        # 查找资源池集群
+        resource_pool_set = conn.cc_SetBase.find_one({"bk_biz_id": biz_id})
+        if not resource_pool_set:
+            return make_response(data={"count": 0, "info": []})
+        
+        set_id = resource_pool_set.get("bk_set_id")
+        
+        # 构建查询条件
+        condition = req_data.get("condition", {})
+        if not condition:
+            condition = {}
+        condition["bk_biz_id"] = biz_id
+        condition["bk_set_id"] = set_id
+        
+        # 字段和分页
+        fields = req_data.get("fields", [])
+        page = req_data.get("page", {})
+        sort = page.get("sort", "bk_module_name")
+        is_fuzzy = req_data.get("is_fuzzy", False)
+        
+        # 确保有必要字段
+        if "bk_module_id" not in fields:
+            fields.append("bk_module_id")
+        if "bk_module_name" not in fields:
+            fields.append("bk_module_name")
+        
+        # 构建查询
+        query = {}
+        for k, v in condition.items():
+            if is_fuzzy and isinstance(v, str):
+                query[k] = {"$regex": v, "$options": "i"}
+            else:
+                query[k] = v
+        
+        # 执行查询
+        cursor = conn.cc_ModuleBase.find(query)
+        
+        # 排序
+        if sort:
+            sort_dir = 1
+            if sort.startswith("-"):
+                sort_dir = -1
+                sort = sort[1:]
+            cursor = cursor.sort(sort, sort_dir)
+        
+        # 获取数据
+        modules = list(cursor)
+        count = len(modules)
+        
+        # 分离空闲机模块和其他模块
+        idle_module_id = 0
+        module_list = []
+        module_map = {}
+        
+        for m in modules:
+            m.pop("_id", None)
+            module_id = m.get("bk_module_id")
+            module_map[module_id] = m
+            
+            bk_default = m.get("bk_default", 0)
+            if bk_default == 1:
+                idle_module_id = module_id
+            else:
+                module_list.append(module_id)
+        
+        # 空闲机放在第一位
+        if idle_module_id:
+            module_list.insert(0, idle_module_id)
+        
+        # 统计每个模块的主机数（暂时返回0）
+        result = []
+        for module_id in module_list:
+            module_info = module_map[module_id]
+            module_info["host_count"] = 0
+            result.append(module_info)
+        
+        return make_response(data={"count": count, "info": result})
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return make_response(result=False, code=500, message=str(e))
+
