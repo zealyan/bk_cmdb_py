@@ -740,6 +740,8 @@ def find_topo_inst_with_statistics(bk_biz_id):
 
 
 
+
+
 @object_bp.route('/api/v3/find/topoinstnode/host_serviceinst_count/<int:biz_id>', methods=['POST'])
 @object_bp.route('/find/topoinstnode/host_serviceinst_count/<int:biz_id>', methods=['POST'])
 def find_topoinstnode_host_serviceinst_count(biz_id):
@@ -1051,3 +1053,151 @@ def findmany_resource_directory():
         traceback.print_exc()
         return make_response(result=False, code=500, message=str(e))
 
+
+@object_bp.route('/api/v3/find/module/host/relation/<int:bk_biz_id>', methods=['POST'])
+@object_bp.route('/find/module/host/relation/<int:bk_biz_id>', methods=['POST'])
+def find_module_host_relation(bk_biz_id):
+    """根据模块ID查找主机关联关系"""
+    try:
+        conn = get_db_connection()
+        if conn is None:
+            return make_response(result=False, code=500, message="数据库连接失败")
+
+        # 获取请求数据
+        req_data = {}
+        if request.is_json:
+            req_data = request.get_json() or {}
+        elif request.form:
+            req_data = request.form.to_dict()
+        elif request.data:
+            try:
+                import json
+                req_data = json.loads(request.data)
+            except:
+                req_data = {}
+
+        module_ids = req_data.get("bk_module_ids", [])
+        host_fields = req_data.get("host_fields", [])
+        module_fields = req_data.get("module_fields", [])
+        page = req_data.get("page", {})
+
+        start = page.get("start", 0)
+        limit = page.get("limit", 20)
+        sort = page.get("sort", "bk_host_id")
+
+        # 查询主机-模块关系
+        if module_ids:
+            host_relations = list(conn.cc_HostModuleRelation.find({
+                "bk_biz_id": bk_biz_id,
+                "bk_module_id": {"$in": module_ids}
+            }))
+        else:
+            host_relations = list(conn.cc_HostModuleRelation.find({
+                "bk_biz_id": bk_biz_id
+            }))
+
+        # 获取主机ID列表
+        host_ids = [rel.get("bk_host_id") for rel in host_relations]
+
+        if not host_ids:
+            return make_response(data={
+                "count": 0,
+                "relation": []
+            })
+
+        # 查询主机信息
+        query = {"bk_host_id": {"$in": host_ids}}
+        cursor = conn.cc_HostBase.find(query)
+
+        # 排序
+        if sort:
+            sort_dir = 1
+            if sort.startswith("-"):
+                sort_dir = -1
+                sort = sort[1:]
+            cursor = cursor.sort(sort, sort_dir)
+
+        # 总数
+        total_count = conn.cc_HostBase.count_documents(query)
+
+        # 分页
+        cursor = cursor.skip(start).limit(limit)
+
+        # 获取主机
+        hosts = []
+        for doc in cursor:
+            doc.pop("_id", None)
+            if host_fields:
+                filtered_host = {}
+                for field in host_fields:
+                    if field in doc:
+                        filtered_host[field] = doc[field]
+                hosts.append(filtered_host)
+            else:
+                hosts.append(doc)
+
+        if not hosts:
+            return make_response(data={
+                "count": total_count,
+                "relation": []
+            })
+
+        # 构建主机关联关系
+        host_id_list = [host.get("bk_host_id") for host in hosts]
+
+        # 查询这些主机的模块关系
+        host_module_map = {}
+        module_id_set = set()
+        for rel in host_relations:
+            host_id = rel.get("bk_host_id")
+            if host_id in host_id_list:
+                if host_id not in host_module_map:
+                    host_module_map[host_id] = []
+                module_id = rel.get("bk_module_id")
+                host_module_map[host_id].append(module_id)
+                module_id_set.add(module_id)
+
+        # 查询模块信息
+        modules = []
+        if module_id_set:
+            module_query = {"bk_module_id": {"$in": list(module_id_set)}}
+            module_cursor = conn.cc_ModuleBase.find(module_query)
+            for doc in module_cursor:
+                doc.pop("_id", None)
+                if module_fields:
+                    filtered_module = {}
+                    for field in module_fields:
+                        if field in doc:
+                            filtered_module[field] = doc[field]
+                    modules.append(filtered_module)
+                else:
+                    modules.append(doc)
+
+        # 构建模块映射
+        module_map = {}
+        for module in modules:
+            module_id = module.get("bk_module_id")
+            module_map[module_id] = module
+
+        # 组装结果
+        relation = []
+        for host in hosts:
+            host_id = host.get("bk_host_id")
+            module_ids_for_host = host_module_map.get(host_id, [])
+            host_modules = []
+            for module_id in module_ids_for_host:
+                if module_id in module_map:
+                    host_modules.append(module_map[module_id])
+            relation.append({
+                "host": host,
+                "modules": host_modules
+            })
+
+        return make_response(data={
+            "count": total_count,
+            "relation": relation
+        })
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return make_response(result=False, code=500, message=str(e))
