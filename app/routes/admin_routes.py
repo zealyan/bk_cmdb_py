@@ -605,8 +605,48 @@ def find_object():
 @admin_bp.route('/hosts/search', methods=['POST'])
 def hosts_search():
     try:
-        return make_response(data={"info": [], "count": 0})
+        from app.models.db import get_db_connection
+        conn = get_db_connection()
+        if conn is None:
+            return make_response(result=False, code=500, message="数据库连接失败")
+
+        # 获取请求数据
+        req_data = request.get_json() or {}
+        page = req_data.get('page', {})
+        start = page.get('start', 0)
+        limit = page.get('limit', 20)
+        sort = page.get('sort', 'bk_host_id')
+
+        # 查询主机数据
+        collection = conn['cc_HostBase']
+        query = {}
+        
+        cursor = collection.find(query)
+        
+        # 排序
+        if sort:
+            sort_dir = 1
+            if sort.startswith('-'):
+                sort_dir = -1
+                sort = sort[1:]
+            cursor = cursor.sort(sort, sort_dir)
+        
+        # 总数
+        total_count = collection.count_documents(query)
+        
+        # 分页
+        cursor = cursor.skip(start).limit(limit)
+        
+        # 处理结果
+        hosts = []
+        for doc in cursor:
+            doc.pop('_id', None)
+            hosts.append(doc)
+        
+        return make_response(data={"info": hosts, "count": total_count})
     except Exception as e:
+        import traceback
+        traceback.print_exc()
         return make_response(result=False, code=500, message=str(e))
 
 
@@ -614,8 +654,48 @@ def hosts_search():
 @admin_bp.route('/hosts/search/web', methods=['POST'])
 def hosts_search_web():
     try:
-        return make_response(data={"info": [], "count": 0})
+        from app.models.db import get_db_connection
+        conn = get_db_connection()
+        if conn is None:
+            return make_response(result=False, code=500, message="数据库连接失败")
+
+        # 获取请求数据
+        req_data = request.get_json() or {}
+        page = req_data.get('page', {})
+        start = page.get('start', 0)
+        limit = page.get('limit', 20)
+        sort = page.get('sort', 'bk_host_id')
+
+        # 查询主机数据
+        collection = conn['cc_HostBase']
+        query = {}
+        
+        cursor = collection.find(query)
+        
+        # 排序
+        if sort:
+            sort_dir = 1
+            if sort.startswith('-'):
+                sort_dir = -1
+                sort = sort[1:]
+            cursor = cursor.sort(sort, sort_dir)
+        
+        # 总数
+        total_count = collection.count_documents(query)
+        
+        # 分页
+        cursor = cursor.skip(start).limit(limit)
+        
+        # 处理结果
+        hosts = []
+        for doc in cursor:
+            doc.pop('_id', None)
+            hosts.append(doc)
+        
+        return make_response(data={"info": hosts, "count": total_count})
     except Exception as e:
+        import traceback
+        traceback.print_exc()
         return make_response(result=False, code=500, message=str(e))
 
 
