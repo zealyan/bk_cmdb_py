@@ -147,29 +147,39 @@ def find_object_attr():
             collection = get_mongo_collection('cc_ObjAttDes')
             docs = collection.find({"bk_obj_id": {"$in": obj_ids}})
             # 简单的排序
-            docs_sorted = sorted(docs, key=lambda x: x.get("id", 0))
+            docs_sorted = sorted(docs, key=lambda x: x.get("bk_property_index", x.get("id", 0)))
             for doc in docs_sorted:
-                # 转换字段格式，匹配前端期望的字段名
+                # 转换字段格式，匹配Go原版API返回的字段结构
                 attr = {
                     "id": doc.get("id"),
+                    "bk_supplier_account": doc.get("bk_supplier_account", "0"),
                     "bk_obj_id": doc.get("bk_obj_id"),
                     "bk_property_id": doc.get("bk_property_id"),
                     "bk_property_name": doc.get("bk_property_name"),
                     "bk_property_type": doc.get("bk_property_type"),
-                    "bk_property_group": doc.get("bk_property_group"),
-                    "bk_property_index": doc.get("id"),  # 使用 id 作为排序
-                    "isreadonly": doc.get("is_readonly"),
-                    "isrequired": doc.get("is_required"),
-                    "ispre": doc.get("is_pre"),
-                    "isonly": doc.get("is_only"),
-                    "bk_issystem": doc.get("bk_is_system"),
-                    "bk_isapi": doc.get("bk_is_api"),
-                    "default": doc.get("default")
+                    "bk_property_group": doc.get("bk_property_group", "default"),
+                    "bk_property_index": doc.get("bk_property_index", 0),
+                    "unit": doc.get("unit", ""),
+                    "placeholder": doc.get("placeholder", ""),
+                    "editable": doc.get("editable", True),
+                    "ispre": doc.get("is_pre", False),
+                    "isrequired": doc.get("is_required", False),
+                    "isreadonly": doc.get("isreadonly", doc.get("is_readonly", False)),
+                    "isonly": doc.get("is_only", False),
+                    "bk_issystem": doc.get("bk_issystem", doc.get("bk_is_system", False)),
+                    "bk_isapi": doc.get("bk_isapi", doc.get("bk_is_api", False)),
+                    "option": doc.get("option", ""),
+                    "description": doc.get("description", ""),
+                    "creator": doc.get("creator", ""),
+                    "create_time": doc.get("create_time", ""),
+                    "last_time": doc.get("last_time", ""),
+                    "bk_property_group_name": doc.get("bk_property_group", "default")
                 }
-                # 确保所有字段都有默认值
-                for key in ["isreadonly", "isrequired", "ispre", "isonly", "bk_issystem", "bk_isapi"]:
-                    if attr.get(key) is None:
-                        attr[key] = False
+                # 确保布尔字段有正确的默认值
+                if attr.get("editable") is None:
+                    attr["editable"] = True
+                if attr.get("isreadonly") is None:
+                    attr["isreadonly"] = False
                 all_attributes.append(attr)
         
         return make_response(data=all_attributes)
