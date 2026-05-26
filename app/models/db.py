@@ -2822,6 +2822,43 @@ INIT_DATA = {
             "create_time": "2024-01-19 14:00:00",
             "last_time": "2024-01-19 14:00:00"
         }
+    ],
+    "cc_HostModuleRelation": [
+        {
+            "bk_host_id": 1,
+            "bk_biz_id": 1,
+            "bk_set_id": 5,
+            "bk_module_id": 8,
+            "bk_supplier_account": "0"
+        },
+        {
+            "bk_host_id": 2,
+            "bk_biz_id": 1,
+            "bk_set_id": 5,
+            "bk_module_id": 8,
+            "bk_supplier_account": "0"
+        },
+        {
+            "bk_host_id": 3,
+            "bk_biz_id": 1,
+            "bk_set_id": 5,
+            "bk_module_id": 9,
+            "bk_supplier_account": "0"
+        },
+        {
+            "bk_host_id": 4,
+            "bk_biz_id": 1,
+            "bk_set_id": 5,
+            "bk_module_id": 9,
+            "bk_supplier_account": "0"
+        },
+        {
+            "bk_host_id": 5,
+            "bk_biz_id": 1,
+            "bk_set_id": 5,
+            "bk_module_id": 10,
+            "bk_supplier_account": "0"
+        }
     ]
 }
 
@@ -2840,6 +2877,13 @@ def init_mock_data():
         for doc in documents:
             if "_id" in doc:
                 conn[collection].update_one({"_id": doc["_id"]}, {"$set": doc}, upsert=True)
+            elif collection == "cc_HostModuleRelation":
+                # 特殊处理host module relation，用host_id和module_id组合查询
+                conn[collection].update_one(
+                    {"bk_host_id": doc["bk_host_id"], "bk_module_id": doc["bk_module_id"]},
+                    {"$set": doc}, 
+                    upsert=True
+                )
             elif "bk_module_id" in doc:
                 conn[collection].update_one({"bk_module_id": doc["bk_module_id"]}, {"$set": doc}, upsert=True)
             elif "bk_set_id" in doc:

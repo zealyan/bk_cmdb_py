@@ -616,11 +616,33 @@ def hosts_search():
         start = page.get('start', 0)
         limit = page.get('limit', 20)
         sort = page.get('sort', 'bk_host_id')
-
-        # 查询主机数据
-        collection = conn['cc_HostBase']
+        conditions = req_data.get('condition', [])
+        
+        # 查询条件处理
         query = {}
         
+        # 如果有条件，处理条件
+        if conditions and len(conditions) > 0:
+            # 查找资源池业务条件
+            biz_condition = None
+            for cond in conditions:
+                if cond.get('bk_obj_id') == 'biz':
+                    biz_condition = cond
+                    break
+            
+            # 如果有资源池条件，并且是默认业务，查询所有主机
+            if biz_condition:
+                biz_filter = biz_condition.get('condition', [])
+                for f in biz_filter:
+                    if f.get('field') == 'default' and f.get('value') == 1:
+                        # 查询资源池下的所有主机
+                        host_relations = list(conn.cc_HostModuleRelation.find({"bk_biz_id": 1}))
+                        host_ids = [r.get('bk_host_id') for r in host_relations]
+                        if host_ids:
+                            query = {"bk_host_id": {"$in": host_ids}}
+        
+        # 查询主机数据
+        collection = conn['cc_HostBase']
         cursor = collection.find(query)
         
         # 排序
@@ -665,11 +687,33 @@ def hosts_search_web():
         start = page.get('start', 0)
         limit = page.get('limit', 20)
         sort = page.get('sort', 'bk_host_id')
-
-        # 查询主机数据
-        collection = conn['cc_HostBase']
+        conditions = req_data.get('condition', [])
+        
+        # 查询条件处理
         query = {}
         
+        # 如果有条件，处理条件
+        if conditions and len(conditions) > 0:
+            # 查找资源池业务条件
+            biz_condition = None
+            for cond in conditions:
+                if cond.get('bk_obj_id') == 'biz':
+                    biz_condition = cond
+                    break
+            
+            # 如果有资源池条件，并且是默认业务，查询所有主机
+            if biz_condition:
+                biz_filter = biz_condition.get('condition', [])
+                for f in biz_filter:
+                    if f.get('field') == 'default' and f.get('value') == 1:
+                        # 查询资源池下的所有主机
+                        host_relations = list(conn.cc_HostModuleRelation.find({"bk_biz_id": 1}))
+                        host_ids = [r.get('bk_host_id') for r in host_relations]
+                        if host_ids:
+                            query = {"bk_host_id": {"$in": host_ids}}
+        
+        # 查询主机数据
+        collection = conn['cc_HostBase']
         cursor = collection.find(query)
         
         # 排序

@@ -664,6 +664,9 @@ def find_topo_inst_with_statistics(bk_biz_id):
             # 如果没有任何业务，返回空结构
             return make_response(data=[])
         
+        # 查询主机-模块关系
+        host_relations = list(conn.cc_HostModuleRelation.find({"bk_biz_id": business.get("bk_biz_id")}))
+        
         # 查询该业务下的所有集群
         sets = list(conn.cc_SetBase.find({"bk_biz_id": business.get("bk_biz_id"), "bk_data_status": {"$ne": "disabled"}}))
         
@@ -672,6 +675,8 @@ def find_topo_inst_with_statistics(bk_biz_id):
         
         # 构建集群节点
         set_nodes = []
+        total_host_count = 0
+        
         for s in sets:
             set_id = s.get("bk_set_id")
             # 查找该集群下的所有模块
@@ -679,20 +684,28 @@ def find_topo_inst_with_statistics(bk_biz_id):
             
             # 构建模块节点
             module_nodes = []
+            set_host_count = 0
             for m in set_modules:
+                module_id = m.get("bk_module_id")
+                # 统计该模块下的主机数
+                module_hosts = [r for r in host_relations if r.get("bk_module_id") == module_id]
+                host_count = len(module_hosts)
+                set_host_count += host_count
+                
                 module_node = {
                     "bk_obj_id": "module",
                     "bk_obj_name": "模块",
                     "bk_inst_id": m.get("bk_module_id"),
                     "bk_inst_name": m.get("bk_module_name"),
-                    "default": 0,
+                    "default": m.get("bk_default", 0),
                     "child": [],
-                    "host_count": 0,
+                    "host_count": host_count,
                     "service_instance_count": 0
                 }
                 module_nodes.append(module_node)
             
             # 构建集群节点
+            total_host_count += set_host_count
             set_node = {
                 "bk_obj_id": "set",
                 "bk_obj_name": "集群",
@@ -700,7 +713,7 @@ def find_topo_inst_with_statistics(bk_biz_id):
                 "bk_inst_name": s.get("bk_set_name"),
                 "default": 0,
                 "child": module_nodes,
-                "host_count": 0,
+                "host_count": set_host_count,
                 "service_instance_count": 0
             }
             set_nodes.append(set_node)
@@ -711,9 +724,9 @@ def find_topo_inst_with_statistics(bk_biz_id):
             "bk_obj_name": "业务",
             "bk_inst_id": business.get("bk_biz_id"),
             "bk_inst_name": business.get("bk_biz_name"),
-            "default": 0,
+            "default": business.get("bk_default", 0),
             "child": set_nodes,
-            "host_count": 0,
+            "host_count": total_host_count,
             "service_instance_count": 0
         }
         
@@ -732,6 +745,10 @@ def find_topo_inst_with_statistics(bk_biz_id):
 def find_topoinstnode_host_serviceinst_count(biz_id):
     """获取拓扑节点的主机和服务实例统计信息"""
     try:
+        conn = get_db_connection()
+        if conn is None:
+            return make_response(result=False, code=500, message="数据库连接失败")
+        
         # 兼容多种请求数据格式
         req_data = {}
         if request.is_json:
@@ -747,13 +764,30 @@ def find_topoinstnode_host_serviceinst_count(biz_id):
         
         conditions = req_data.get('condition', [])
         
-        # 为每个节点返回统计数据（当前返回默认值）
+        # 查询主机-模块关系
+        host_relations = list(conn.cc_HostModuleRelation.find({"bk_biz_id": biz_id}))
+        
+        # 为每个节点返回统计数据
         result = []
         for node in conditions:
+            bk_obj_id = node.get('bk_obj_id')
+            bk_inst_id = node.get('bk_inst_id')
+            
+            host_count = 0
+            if bk_obj_id == "module":
+                # 统计模块下的主机
+                host_count = len([r for r in host_relations if r.get("bk_module_id") == bk_inst_id])
+            elif bk_obj_id == "set":
+                # 统计集群下的主机
+                host_count = len([r for r in host_relations if r.get("bk_set_id") == bk_inst_id])
+            elif bk_obj_id == "biz":
+                # 统计业务下的所有主机
+                host_count = len(host_relations)
+            
             result.append({
-                "bk_obj_id": node.get('bk_obj_id'),
-                "bk_inst_id": node.get('bk_inst_id'),
-                "host_count": 0,
+                "bk_obj_id": bk_obj_id,
+                "bk_inst_id": bk_inst_id,
+                "host_count": host_count,
                 "service_instance_count": 0
             })
         
@@ -930,6 +964,9 @@ def findmany_resource_directory():
         
         biz_id = resource_pool_biz.get("bk_biz_id")
         
+        # 查询主机-模块关系
+        host_relations = list(conn.cc_HostModuleRelation.find({"bk_biz_id": biz_id}))
+        
         # 查找资源池集群
         resource_pool_set = conn.cc_SetBase.find_one({"bk_biz_id": biz_id})
         if not resource_pool_set:
@@ -999,11 +1036,13 @@ def findmany_resource_directory():
         if idle_module_id:
             module_list.insert(0, idle_module_id)
         
-        # 统计每个模块的主机数（暂时返回0）
+        # 统计每个模块的主机数量
         result = []
         for module_id in module_list:
             module_info = module_map[module_id]
-            module_info["host_count"] = 0
+            # 统计该模块下的主机
+            module_hosts = [r for r in host_relations if r.get("bk_module_id") == module_id]
+            module_info["host_count"] = len(module_hosts)
             result.append(module_info)
         
         return make_response(data={"count": count, "info": result})
