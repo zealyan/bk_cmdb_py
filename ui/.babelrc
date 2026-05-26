@@ -1,0 +1,32 @@
+{
+  "presets": [
+    [
+      "@babel/preset-env",
+      {
+        "useBuiltIns": "usage",
+        "corejs": 3,
+        "debug": false
+      }
+    ],
+    [
+      "@vue/babel-preset-jsx",
+      {
+        // https://www.npmjs.com/package/@vue/babel-preset-jsx
+        "compositionAPI": "naruto"
+      }
+    ]
+  ],
+  "plugins": [
+    "@babel/plugin-transform-runtime",
+    "@babel/plugin-transform-object-assign",
+    "@babel/plugin-syntax-dynamic-import",
+    "@babel/plugin-proposal-function-sent",
+    "@babel/plugin-proposal-export-namespace-from",
+    "@babel/plugin-proposal-numeric-separator",
+    "@babel/plugin-proposal-throw-expressions",
+    "@babel/plugin-transform-async-to-generator",
+    ["import-bk-magic-vue", {
+      "baseLibName": "bk-magic-vue"
+    }]
+  ]
+}

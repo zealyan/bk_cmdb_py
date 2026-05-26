@@ -1,0 +1,28 @@
+# BK-CMDB Python Backend Requirements
+# Python Version: 3.10+
+
+# Web Framework
+Flask==2.3.3
+Flask-Cors==4.0.0
+Flask-SQLAlchemy==3.1.1
+Flask-Session>=0.5.0     # Session 管理
+
+# Database
+pymongo==4.5.0
+SQLAlchemy==2.0.23
+mongoengine==0.28.2
+py-pglite==0.5.3        # 开发环境 PostgreSQL 模拟器
+psycopg[binary]==3.3.4  # PostgreSQL 驱动（开发用 py-pglite，生产用 PostgreSQL）
+
+# Environment
+python-dotenv==1.0.0
+
+# Authentication
+bcrypt>=4.1.0           # 密码加密
+
+# Authorization
+casbin>=1.16.0          # Casbin 权限管理
+pyyaml>=6.0             # YAML 解析（Casbin 需要）
+
+# Optional: Gunicorn for production
+# gunicorn>=21.0.0
