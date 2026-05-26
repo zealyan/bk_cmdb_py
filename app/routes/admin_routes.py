@@ -43,15 +43,65 @@ def get_mock_config():
             }
         },
         "validation_rules": {
-            "singlechar": {
-                "value": "^[a-zA-Z0-9_\\-]+$",
+            "number": {
+                "value": "^(\\-|\\+)?\\d+$",
+                "description": "字段类型\"数字\"的验证规则",
                 "i18n": {
-                    "cn": "格式不正确，仅允许字母、数字、下划线和中划线",
-                    "en": "Format is incorrect, only letters, numbers, underscores and hyphens are allowed"
+                    "cn": "请输入正确的数字",
+                    "en": "Please enter the correct number"
+                }
+            },
+            "float": {
+                "value": "^[+-]?([0-9]*[.]?[0-9]+|[0-9]+[.]?[0-9]*)([eE][+-]?[0-9]+)?$",
+                "description": "字段类型\"浮点\"的验证规则",
+                "i18n": {
+                    "cn": "请输入正确的浮点数",
+                    "en": "Please enter the correct float data"
+                }
+            },
+            "singlechar": {
+                "value": "\\S*",
+                "description": "字段类型\"短字符\"的验证规则",
+                "i18n": {
+                    "cn": "请输入正确的短字符内容",
+                    "en": "Please enter the correct content"
+                }
+            },
+            "longchar": {
+                "value": "\\S*",
+                "description": "字段类型\"长字符\"的验证规则",
+                "i18n": {
+                    "cn": "请输入正确的长字符内容",
+                    "en": "Please enter the correct content"
+                }
+            },
+            "associationId": {
+                "value": "^[a-zA-Z][\\w]*$",
+                "description": "关联类型唯一标识验证规则",
+                "i18n": {
+                    "cn": "格式不正确，请填写英文开头，下划线，数字，英文的组合",
+                    "en": "The format is incorrect, can only contain underscores, numbers, letter and start with a letter"
+                }
+            },
+            "classifyId": {
+                "value": "^[a-zA-Z][\\w]*$",
+                "description": "模型分组唯一标识验证规则",
+                "i18n": {
+                    "cn": "请输入正确的内容",
+                    "en": "Please enter the correct content"
+                }
+            },
+            "modelId": {
+                "value": "^[a-zA-Z][\\w]*$",
+                "description": "模型唯一标识验证规则",
+                "i18n": {
+                    "cn": "格式不正确，请填写英文开头，下划线，数字，英文的组合",
+                    "en": "The format is incorrect, can only contain underscores, numbers, letter and start with a letter"
                 }
             },
             "namedCharacter": {
                 "value": "^[a-zA-Z0-9_\\-\\u4e00-\\u9fa5]+$",
+                "description": "命名字符验证规则",
                 "i18n": {
                     "cn": "只能包含数字、字母、下划线、横线和中文",
                     "en": "Can only contain numbers, letters, underscores, hyphens and Chinese characters"
