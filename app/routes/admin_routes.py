@@ -698,11 +698,14 @@ def hosts_search():
                     s.pop('_id', None)
                     set_map[s.get('bk_set_id')] = s
             
-            # 查询业务信息
-            biz_id = 1  # 默认资源池业务
-            biz_info = conn.cc_ApplicationBase.find_one({"bk_biz_id": biz_id})
-            if biz_info:
-                biz_info.pop('_id', None)
+            # 查询业务信息 - 根据实际的主机-模块关系获取业务ID
+            biz_ids = list(set([rel.get('bk_biz_id') for rel in host_relations if rel.get('bk_biz_id')]))
+            biz_map = {}
+            if biz_ids:
+                biz_docs = list(conn.cc_ApplicationBase.find({"bk_biz_id": {"$in": biz_ids}}))
+                for biz in biz_docs:
+                    biz.pop('_id', None)
+                    biz_map[biz.get('bk_biz_id')] = biz
             
             # 构建主机-模块-集群映射
             host_module_map = {}
@@ -725,7 +728,7 @@ def hosts_search():
                     host_set_map[host_id].append(set_id)
                 
                 if host_id not in host_biz_map:
-                    host_biz_map[host_id] = biz_id
+                    host_biz_map[host_id] = rel.get('bk_biz_id')
             
             # 重新查询主机数据并构建返回结果
             for doc in collection.find({"bk_host_id": {"$in": host_id_list}}):
@@ -756,8 +759,9 @@ def hosts_search():
                 
                 # 添加业务信息
                 biz = []
-                if biz_info:
-                    biz.append(biz_info.copy())
+                host_biz_id = host_biz_map.get(host_id)
+                if host_biz_id and host_biz_id in biz_map:
+                    biz.append(biz_map[host_biz_id].copy())
                 item['biz'] = biz
                 
                 result_info.append(item)
