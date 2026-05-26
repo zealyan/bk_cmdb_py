@@ -664,84 +664,103 @@ def hosts_search():
         result_info = []
         host_id_list = []
         
+        # 先收集主机ID
         for doc in cursor:
-            doc.pop('_id', None)
             host_id = doc.get('bk_host_id')
             host_id_list.append(host_id)
-            result_info.append({
-                "host": doc,
-                "topo": []
-            })
         
         # 如果有主机，查询它们的主机-模块关系
         if host_id_list:
             # 查询主机-模块关系
-            if host_ids_filter:
-                host_relations = list(conn.cc_HostModuleRelation.find({
-                    "bk_host_id": {"$in": host_id_list}
-                }))
-            else:
-                host_relations = list(conn.cc_HostModuleRelation.find({
-                    "bk_host_id": {"$in": host_id_list}
-                }))
+            host_relations = list(conn.cc_HostModuleRelation.find({
+                "bk_host_id": {"$in": host_id_list}
+            }))
             
             # 获取所有涉及的模块ID
             module_ids = list(set([r.get('bk_module_id') for r in host_relations if r.get('bk_module_id')]))
             
             # 查询模块信息
-            modules = {}
+            module_map = {}
             if module_ids:
                 module_docs = list(conn.cc_ModuleBase.find({"bk_module_id": {"$in": module_ids}}))
                 for m in module_docs:
                     m.pop('_id', None)
-                    modules[m.get('bk_module_id')] = m
+                    module_map[m.get('bk_module_id')] = m
             
             # 获取所有涉及的集群ID
             set_ids = list(set([r.get('bk_set_id') for r in host_relations if r.get('bk_set_id')]))
             
             # 查询集群信息
-            sets = {}
+            set_map = {}
             if set_ids:
                 set_docs = list(conn.cc_SetBase.find({"bk_set_id": {"$in": set_ids}}))
                 for s in set_docs:
                     s.pop('_id', None)
-                    sets[s.get('bk_set_id')] = s
+                    set_map[s.get('bk_set_id')] = s
+            
+            # 查询业务信息
+            biz_id = 1  # 默认资源池业务
+            biz_info = conn.cc_ApplicationBase.find_one({"bk_biz_id": biz_id})
+            if biz_info:
+                biz_info.pop('_id', None)
             
             # 构建主机-模块-集群映射
-            host_set_module_map = {}
+            host_module_map = {}
+            host_set_map = {}
+            host_biz_map = {}
+            
             for rel in host_relations:
                 host_id = rel.get('bk_host_id')
                 set_id = rel.get('bk_set_id')
                 module_id = rel.get('bk_module_id')
                 
-                if host_id not in host_set_module_map:
-                    host_set_module_map[host_id] = {}
+                if host_id not in host_module_map:
+                    host_module_map[host_id] = []
+                if module_id not in host_module_map[host_id]:
+                    host_module_map[host_id].append(module_id)
                 
-                if set_id not in host_set_module_map[host_id]:
-                    host_set_module_map[host_id][set_id] = []
+                if host_id not in host_set_map:
+                    host_set_map[host_id] = []
+                if set_id not in host_set_map[host_id]:
+                    host_set_map[host_id].append(set_id)
                 
-                host_set_module_map[host_id][set_id].append(module_id)
+                if host_id not in host_biz_map:
+                    host_biz_map[host_id] = biz_id
             
-            # 为每个主机填充topo信息
-            for host_info in result_info:
-                host_id = host_info['host'].get('bk_host_id')
-                topo_map = host_set_module_map.get(host_id, {})
+            # 重新查询主机数据并构建返回结果
+            for doc in collection.find({"bk_host_id": {"$in": host_id_list}}):
+                doc.pop('_id', None)
+                host_id = doc.get('bk_host_id')
                 
-                topo_list = []
-                for set_id, module_ids in topo_map.items():
-                    set_info = sets.get(set_id, {})
-                    module_list = []
-                    for module_id in module_ids:
-                        module_info = modules.get(module_id, {})
-                        module_list.append(module_info)
-                    
-                    topo_list.append({
-                        "bk_set_id": set_id,
-                        "bk_set_name": set_info.get('bk_set_name', ''),
-                        "module": module_list
-                    })
+                # 获取该主机的模块、集群、业务信息
+                host_module_ids = host_module_map.get(host_id, [])
+                host_set_ids = host_set_map.get(host_id, [])
                 
-                host_info['topo'] = topo_list
+                # 构建返回对象
+                item = {}
+                item['host'] = doc
+                
+                # 添加模块信息
+                modules = []
+                for mid in host_module_ids:
+                    if mid in module_map:
+                        modules.append(module_map[mid].copy())
+                item['module'] = modules
+                
+                # 添加集群信息
+                sets = []
+                for sid in host_set_ids:
+                    if sid in set_map:
+                        sets.append(set_map[sid].copy())
+                item['set'] = sets
+                
+                # 添加业务信息
+                biz = []
+                if biz_info:
+                    biz.append(biz_info.copy())
+                item['biz'] = biz
+                
+                result_info.append(item)
         
         return make_response(data={"info": result_info, "count": total_count})
     except Exception as e:
