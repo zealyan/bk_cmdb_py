@@ -804,3 +804,81 @@ def create_instance(obj_id):
         traceback.print_exc()
         return make_response(result=False, code=500, message=str(e))
 
+
+
+
+@object_bp.route('/api/v3/find/topoinst/biz/<int:bk_biz_id>', methods=['POST'])
+@object_bp.route('/find/topoinst/biz/<int:bk_biz_id>', methods=['POST'])
+def find_business_topo_inst(bk_biz_id):
+    """搜索业务拓扑实例"""
+    try:
+        conn = get_db_connection()
+        if conn is None:
+            return make_response(result=False, code=500, message="数据库连接失败")
+
+        # 查询业务信息
+        business = conn.cc_ApplicationBase.find_one({"bk_biz_id": bk_biz_id})
+        if not business:
+            # 如果没有找到指定业务，返回第一个启用的业务
+            business = conn.cc_ApplicationBase.find_one({"bk_data_status": {"$ne": "disabled"}})
+        
+        if not business:
+            return make_response(result=False, code=404, message="业务不存在")
+
+        biz_id = business.get("bk_biz_id")
+        biz_name = business.get("bk_biz_name", "")
+
+        # 构建拓扑结构
+        topo_result = []
+        
+        # 添加业务节点
+        biz_node = {
+            "bk_inst_id": biz_id,
+            "bk_inst_name": biz_name,
+            "bk_obj_id": "biz",
+            "bk_obj_name": "业务",
+            "children": []
+        }
+        
+        # 查询该业务下的所有集群
+        sets = list(conn.cc_SetBase.find({
+            "bk_biz_id": biz_id,
+            "bk_data_status": {"$ne": "disabled"}
+        }).sort("bk_set_name", 1))
+        
+        for s in sets:
+            set_node = {
+                "bk_inst_id": s.get("bk_set_id"),
+                "bk_inst_name": s.get("bk_set_name", ""),
+                "bk_obj_id": "set",
+                "bk_obj_name": "集群",
+                "children": []
+            }
+            
+            # 查询该集群下的所有模块
+            modules = list(conn.cc_ModuleBase.find({
+                "bk_set_id": s.get("bk_set_id"),
+                "bk_biz_id": biz_id,
+                "bk_data_status": {"$ne": "disabled"}
+            }).sort("bk_module_name", 1))
+            
+            for m in modules:
+                module_node = {
+                    "bk_inst_id": m.get("bk_module_id"),
+                    "bk_inst_name": m.get("bk_module_name", ""),
+                    "bk_obj_id": "module",
+                    "bk_obj_name": "模块",
+                    "children": []
+                }
+                set_node["children"].append(module_node)
+            
+            biz_node["children"].append(set_node)
+        
+        topo_result.append(biz_node)
+        
+        return make_response(data=topo_result)
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return make_response(result=False, code=500, message=str(e))
+
