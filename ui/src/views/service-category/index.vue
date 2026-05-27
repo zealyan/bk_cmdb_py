@@ -37,7 +37,8 @@
               ref="editInput"
               :input-ref="'categoryInput'"
               :placeholder="$t('请输入一级分类')"
-              name="categoryName"
+              name="mainCategoryName"
+              data-vv-scope="mainCategory"
               v-validate="'required|namedCharacter|length:128'"
               v-model="mainCategoryName"
               @on-confirm="handleEditCategory(mainCategory, 'main', index)"
@@ -111,7 +112,8 @@
               ref="editInput"
               :input-ref="'categoryInput'"
               :placeholder="$t('请输入二级分类')"
-              name="categoryName"
+              name="childCategoryName"
+              :data-vv-scope="'childCategory_' + childCategory['id']"
               v-validate="'required|namedCharacter|length:128'"
               v-model="childCategoryName"
               @on-confirm="handleEditCategory(childCategory, 'child', index)"
@@ -175,7 +177,8 @@
               :input-ref="'categoryInput'"
               :placeholder="$t('请输入二级分类')"
               :edit-id="mainCategory['bk_root_id']"
-              name="categoryName"
+              name="addChildCategoryName"
+              data-vv-scope="addChildCategory"
               v-validate="'required|namedCharacter|length:128'"
               v-model="categoryName"
               @on-confirm="handleAddCategory"
@@ -194,7 +197,8 @@
               ref="addCategoryInput"
               :input-ref="'categoryInput'"
               :placeholder="$t('请输入一级分类')"
-              name="categoryName"
+              name="addMainCategoryName"
+              data-vv-scope="addMainCategory"
               v-validate="'required|namedCharacter|length:128'"
               v-model="categoryName"
               @on-confirm="handleAddCategory"
@@ -343,9 +347,11 @@
         tipsInstance.reference.parentElement.classList[willShow ? 'add' : 'remove']('tips-active')
       },
       async handleAddCategory(name, bk_root_id = 0) {
-        if (!await this.$validator.validateAll()) {
+        const scope = bk_root_id > 0 ? 'addChildCategory' : 'addMainCategory'
+        const fieldName = bk_root_id > 0 ? 'addChildCategoryName' : 'addMainCategoryName'
+        if (!await this.$validator.validate(scope)) {
           this.$bkMessage({
-            message: this.errors.first('categoryName') || this.$t('请输入分类名称'),
+            message: this.errors.first(fieldName) || this.$t('请输入分类名称'),
             theme: 'error'
           })
         } else {
@@ -353,9 +359,11 @@
         }
       },
       async handleEditCategory(data, type, mainIndex) {
-        if (!await this.$validator.validateAll()) {
+        const scope = type === 'main' ? 'mainCategory' : `childCategory_${data.id}`
+        const fieldName = type === 'main' ? 'mainCategoryName' : 'childCategoryName'
+        if (!await this.$validator.validate(scope)) {
           this.$bkMessage({
-            message: this.errors.first('categoryName') || this.$t('请输入分类名称'),
+            message: this.errors.first(fieldName) || this.$t('请输入分类名称'),
             theme: 'error'
           })
         } else if (data.name === this.mainCategoryName || data.name === this.childCategoryName) {
