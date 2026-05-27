@@ -430,6 +430,7 @@
       handleCloseEditMain() {
         this.editMainStatus = null
         this.isMainAuthCompleted = false
+        this.$validator.reset()
       },
       handleEditChild(id, name) {
         this.editChildStatus = id
@@ -443,6 +444,7 @@
       },
       handleCloseEditChild() {
         this.editChildStatus = null
+        this.$validator.reset()
       },
       handleAddBox() {
         this.showAddMianCategory = true
@@ -453,6 +455,7 @@
       handleCloseAddBox() {
         this.showAddMianCategory = false
         this.categoryName = ''
+        this.$validator.reset()
       },
       handleShowAddChild(id) {
         this.addChildStatus = id
@@ -464,6 +467,7 @@
       handleCloseAddChild() {
         this.addChildStatus = null
         this.categoryName = ''
+        this.$validator.reset()
       }
     }
   }
