@@ -192,3 +192,71 @@ func (m *user) GetUserList(c *gin.Context, config map[string]string) ([]*metadat
 - 自动化测试环境
 - 演示环境
 - 快速原型验证
+
+## 九、Python后端实现
+
+### 9.1 环境变量配置
+
+Python后端支持两种配置方式：
+
+**方式一：传统方式**
+```bash
+export SKIP_LOGIN=true
+export SKIP_LOGIN_USER=admin
+```
+
+**方式二：Go风格（LOGIN_VERSION）**
+```bash
+export LOGIN_VERSION=skip-login
+export SKIP_LOGIN_USER=admin
+```
+
+### 9.2 配置键说明
+
+| 环境变量 | 说明 | 默认值 |
+|---------|------|--------|
+| `SKIP_LOGIN` | 是否启用skip-login | `false` |
+| `LOGIN_VERSION` | 登录版本（与Go保持一致） | 空 |
+| `SKIP_LOGIN_USER` | 自动登录的用户名 | `admin` |
+
+### 9.3 代码实现位置
+
+- **配置模块**：[app/config.py](file:///workspace/app/config.py#L83-L96)
+- **认证逻辑**：[app/routes/user_routes.py](file:///workspace/app/routes/user_routes.py#L20-L73)
+- **登录接口**：[app/routes/user_routes.py](file:///workspace/app/routes/user_routes.py#L76-L251)
+
+### 9.4 Skip Login入口页面
+
+Python后端提供了专门的skip-login入口页面：
+
+- `/skip-login` - Skip Login入口页面
+- `/dev` - 开发环境入口页面
+
+### 9.5 工作原理
+
+1. 当 `SKIP_LOGIN=true` 或 `LOGIN_VERSION=skip-login` 时启用
+2. 访问任何API时，`@require_auth` 装饰器自动使用admin用户
+3. 登录接口 `/user/auth` 和 `/api/v3/user/auth` 自动返回admin的Token
+4. 用户信息接口 `/user/info` 和 `/api/v3/user/info` 返回admin用户信息
+
+### 9.6 启动命令
+
+```bash
+cd /workspace
+export SKIP_LOGIN=true
+export SKIP_LOGIN_USER=admin
+python app.py
+```
+
+### 9.7 前端配置
+
+前端 `index.dev.html` 已预设admin用户：
+
+```javascript
+window.User = {
+    admin: 1,
+    name: "admin"
+}
+```
+
+访问 `http://localhost:3000/skip-login` 或 `http://localhost:3000/dev` 使用skip-login模式。

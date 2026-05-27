@@ -1,4 +1,4 @@
-from flask import Flask, jsonify
+from flask import Flask, jsonify, send_from_directory
 from flask_cors import CORS
 from flask_session import Session
 from app.config import Config
@@ -59,6 +59,18 @@ def index():
             "pglite": True
         }
     })
+
+
+@app.route('/skip-login')
+def skip_login_index():
+    """Skip Login 入口页面（开发环境专用）"""
+    return send_from_directory('app/static', 'index.skip-login.html')
+
+
+@app.route('/dev')
+def dev_index():
+    """开发环境入口页面"""
+    return send_from_directory('app/static', 'index.skip-login.html')
 
 
 @app.route('/health')

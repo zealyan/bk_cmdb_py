@@ -82,9 +82,14 @@ class Config:
     
     # Skip Login Configuration (开发环境跳过登录)
     # 通过环境变量 SKIP_LOGIN=true 开启自动登录
+    # 或者通过 LOGIN_VERSION=skip-login 开启（与Go版本保持一致）
+    LOGIN_VERSION = os.environ.get('LOGIN_VERSION', '').lower()
     SKIP_LOGIN = os.environ.get('SKIP_LOGIN', 'false').lower() == 'true'
-    if SKIP_LOGIN:
+    if SKIP_LOGIN or LOGIN_VERSION == 'skip-login':
+        SKIP_LOGIN = True
         print("[Skip Login] 已启用自动登录功能（开发模式）")
+        if LOGIN_VERSION:
+            print(f"[Skip Login] LOGIN_VERSION: {LOGIN_VERSION}")
     SKIP_LOGIN_USER = os.environ.get('SKIP_LOGIN_USER', 'admin')
     
     @classmethod
