@@ -14,6 +14,7 @@ const path = require('path')
 
 const { HOST } = process.env
 const PORT = process.env.PORT && Number(process.env.PORT)
+const SKIP_LOGIN = process.env.SKIP_LOGIN === 'true'
 
 module.exports = config => ({
   before(app) {
@@ -23,7 +24,7 @@ module.exports = config => ({
   clientLogLevel: 'error',
   historyApiFallback: {
     rewrites: [
-      { from: /.*/, to: path.posix.join(config.dev.assetsPublicPath, 'index.html') },
+      { from: /.*/, to: path.posix.join(config.dev.assetsPublicPath, SKIP_LOGIN ? 'index-skip-login.html' : 'index.html') },
     ],
   },
   hot: true, // Enabling HMR

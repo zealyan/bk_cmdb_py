@@ -411,3 +411,29 @@ def user_info():
         })
     except Exception as e:
         return make_response(result=False, code=500, message=str(e))
+
+
+@user_bp.route('/api/v3/site/config', methods=['GET'])
+@user_bp.route('/site/config', methods=['GET'])
+def site_config():
+    """获取站点配置信息
+    
+    返回前端需要的站点配置信息，包括登录方式等。
+    
+    Response (JSON):
+        {
+            "result": true,
+            "code": 0,
+            "message": "success",
+            "data": {
+                "login": "skip-login" | "internal" | "",
+                "authscheme": "internal" | "iam"
+            }
+        }
+    """
+    login_version = "skip-login" if Config.SKIP_LOGIN else ""
+    
+    return make_response(data={
+        "login": login_version,
+        "authscheme": "internal"
+    })
