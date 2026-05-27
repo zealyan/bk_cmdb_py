@@ -1293,8 +1293,8 @@ def create_service_category():
             return make_response(result=False, code=400, message="name too long, max length is 128")
         
         import re
-        if not re.match(r'^[a-zA-Z0-9\u4e00-\u9fa5_\-:\(\)]+$', name):
-            return make_response(result=False, code=400, message="name not match regex, only supports letters, numbers, Chinese characters, underscores, hyphens, colons and parentheses")
+        if not re.match(r'^[a-zA-Z0-9\u4e00-\u9fa5_\-]+$', name):
+            return make_response(result=False, code=400, message="只能包含数字、字母、下划线、横线和中文")
         
         collection = get_mongo_collection('cc_ServiceCategory')
         
@@ -1399,8 +1399,8 @@ def update_service_category(category_id=None):
                 return make_response(result=False, code=400, message="name too long, max length is 128")
             
             import re
-            if not re.match(r'^[a-zA-Z0-9\u4e00-\u9fa5_\-:\(\)]+$', name):
-                return make_response(result=False, code=400, message="name not match regex")
+            if not re.match(r'^[a-zA-Z0-9\u4e00-\u9fa5_\-]+$', name):
+                return make_response(result=False, code=400, message="只能包含数字、字母、下划线、横线和中文")
             
             unique_filter = {
                 "name": name,
