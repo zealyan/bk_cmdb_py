@@ -1296,23 +1296,28 @@ def create_service_category():
         
         bk_biz_id = req_data.get('bk_biz_id', 0)
         name = req_data.get('name', '')
-        parent_id = req_data.get('parent_id', 0)
+        bk_parent_id = req_data.get('bk_parent_id', req_data.get('parent_id', 0))
+        bk_root_id = req_data.get('bk_root_id', bk_parent_id)
         
         # 从MongoDB查询当前最大ID
         collection = get_mongo_collection('cc_ServiceCategory')
         max_id_doc = collection.find_one(sort=[("id", -1)])
         new_id = (max_id_doc.get("id", 0) + 1) if max_id_doc else 1
         
-        # 创建新服务分类
+        # 创建新服务分类 - 使用正确的字段名，与数据库初始化数据保持一致
         new_category = {
             "id": new_id,
             "bk_biz_id": bk_biz_id,
+            "bk_root_id": bk_root_id,
+            "bk_parent_id": bk_parent_id,
             "name": name,
-            "parent_id": parent_id,
+            "bk_supplier_account": "0",
+            "is_built_in": False,
             "creator": "admin",
             "modifier": "admin",
             "create_time": "2024-01-01T00:00:00Z",
-            "last_time": "2024-01-01T00:00:00Z"
+            "last_time": "2024-01-01T00:00:00Z",
+            "metadata": {"label": {"bk_biz_id": str(bk_biz_id)}}
         }
         
         # 插入数据库
@@ -1357,12 +1362,14 @@ def update_service_category():
         if not category:
             return make_response(result=False, code=404, message="service category not found")
         
-        # 准备更新数据
+        # 准备更新数据 - 使用正确的字段名
         update_data = {}
         if 'name' in req_data:
             update_data['name'] = req_data['name']
-        if 'parent_id' in req_data:
-            update_data['parent_id'] = req_data['parent_id']
+        if 'bk_parent_id' in req_data:
+            update_data['bk_parent_id'] = req_data['bk_parent_id']
+        elif 'parent_id' in req_data:
+            update_data['bk_parent_id'] = req_data['parent_id']
         
         update_data['modifier'] = 'admin'
         update_data['last_time'] = '2024-01-01T00:00:00Z'
