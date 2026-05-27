@@ -37,9 +37,7 @@
               ref="editInput"
               :input-ref="'categoryInput'"
               :placeholder="$t('请输入一级分类')"
-              name="mainCategoryName"
-              data-vv-scope="mainCategory"
-              v-validate="'required|namedCharacter|length:128'"
+              :vid="'mainCategory_' + mainCategory['id']"
               v-model="mainCategoryName"
               @on-confirm="handleEditCategory(mainCategory, 'main', index)"
               @on-cancel="handleCloseEditMain">
@@ -112,9 +110,7 @@
               ref="editInput"
               :input-ref="'categoryInput'"
               :placeholder="$t('请输入二级分类')"
-              name="childCategoryName"
-              :data-vv-scope="'childCategory_' + childCategory['id']"
-              v-validate="'required|namedCharacter|length:128'"
+              :vid="'childCategory_' + childCategory['id']"
               v-model="childCategoryName"
               @on-confirm="handleEditCategory(childCategory, 'child', index)"
               @on-cancel="handleCloseEditChild">
@@ -177,9 +173,7 @@
               :input-ref="'categoryInput'"
               :placeholder="$t('请输入二级分类')"
               :edit-id="mainCategory['bk_root_id']"
-              name="addChildCategoryName"
-              data-vv-scope="addChildCategory"
-              v-validate="'required|namedCharacter|length:128'"
+              :vid="'addChildCategory_' + mainCategory['id']"
               v-model="categoryName"
               @on-confirm="handleAddCategory"
               @on-cancel="handleCloseAddChild">
@@ -197,9 +191,7 @@
               ref="addCategoryInput"
               :input-ref="'categoryInput'"
               :placeholder="$t('请输入一级分类')"
-              name="addMainCategoryName"
-              data-vv-scope="addMainCategory"
-              v-validate="'required|namedCharacter|length:128'"
+              vid="addMainCategory"
               v-model="categoryName"
               @on-confirm="handleAddCategory"
               @on-cancel="handleCloseAddBox">
@@ -347,11 +339,10 @@
         tipsInstance.reference.parentElement.classList[willShow ? 'add' : 'remove']('tips-active')
       },
       async handleAddCategory(name, bk_root_id = 0) {
-        const scope = bk_root_id > 0 ? 'addChildCategory' : 'addMainCategory'
-        const fieldName = bk_root_id > 0 ? 'addChildCategoryName' : 'addMainCategoryName'
-        if (!await this.$validator.validate(scope)) {
+        const vid = bk_root_id > 0 ? `addChildCategory_${bk_root_id}` : 'addMainCategory'
+        if (!await this.$validator.validate(vid)) {
           this.$bkMessage({
-            message: this.errors.first(fieldName) || this.$t('请输入分类名称'),
+            message: this.errors.first(vid) || this.$t('请输入分类名称'),
             theme: 'error'
           })
         } else {
@@ -359,11 +350,10 @@
         }
       },
       async handleEditCategory(data, type, mainIndex) {
-        const scope = type === 'main' ? 'mainCategory' : `childCategory_${data.id}`
-        const fieldName = type === 'main' ? 'mainCategoryName' : 'childCategoryName'
-        if (!await this.$validator.validate(scope)) {
+        const vid = type === 'main' ? `mainCategory_${data.id}` : `childCategory_${data.id}`
+        if (!await this.$validator.validate(vid)) {
           this.$bkMessage({
-            message: this.errors.first(fieldName) || this.$t('请输入分类名称'),
+            message: this.errors.first(vid) || this.$t('请输入分类名称'),
             theme: 'error'
           })
         } else if (data.name === this.mainCategoryName || data.name === this.childCategoryName) {
