@@ -1125,7 +1125,6 @@ def blueking_modify():
 @admin_bp.route('/findmany/proc/service_category/with_statistics', methods=['POST'])
 def find_service_category_with_statistics():
     try:
-        # 兼容多种请求数据格式
         req_data = {}
         if request.is_json:
             req_data = request.get_json() or {}
@@ -1140,62 +1139,54 @@ def find_service_category_with_statistics():
         
         bk_biz_id = req_data.get('bk_biz_id', 0)
         
-        try:
-            # 尝试从MongoDB查询服务分类
-            collection = get_mongo_collection('cc_ServiceCategory')
+        if bk_biz_id == 0:
+            return make_response(result=False, code=400, message="business id can't be empty")
+        
+        collection = get_mongo_collection('cc_ServiceCategory')
+        
+        query = {
+            "bk_biz_id": {"$in": [bk_biz_id, 0]}
+        }
+        
+        categories = list(collection.find(query).sort("name"))
+        
+        category_ids = [cat.get("id") for cat in categories]
+        
+        usage_map = {cid: 0 for cid in category_ids}
+        
+        service_template_collection = get_mongo_collection('cc_ServiceTemplate')
+        template_filter = {
+            "service_category_id": {"$in": category_ids},
+            "bk_biz_id": bk_biz_id
+        }
+        service_templates = list(service_template_collection.find(template_filter))
+        for tpl in service_templates:
+            cid = tpl.get("service_category_id")
+            if cid in usage_map:
+                usage_map[cid] = usage_map.get(cid, 0) + 1
+        
+        module_collection = get_mongo_collection('cc_BaseModule')
+        module_filter = {
+            "service_category_id": {"$in": category_ids},
+            "bk_biz_id": bk_biz_id
+        }
+        modules = list(module_collection.find(module_filter))
+        for mod in modules:
+            cid = mod.get("service_category_id")
+            if cid in usage_map:
+                usage_map[cid] = usage_map.get(cid, 0) + 1
+        
+        result = []
+        for category in categories:
+            clean_category = {k: v for k, v in category.items() if k != '_id'}
+            usage_amount = usage_map.get(category.get("id"), 0)
             
-            # 构建查询条件
-            query = {}
-            if bk_biz_id > 0:
-                # 搜索metadata.label.bk_biz_id字段
-                query["metadata.label.bk_biz_id"] = str(bk_biz_id)
-            
-            # 查询数据
-            categories = list(collection.find(query))
-            
-            # 构建返回数据 - 按照前端期望的格式
-            result = []
-            for category in categories:
-                # 移除_id字段
-                clean_category = {}
-                for key, value in category.items():
-                    if key != '_id':
-                        clean_category[key] = value
-                
-                result.append({
-                    "usage_amount": 0,
-                    "category": clean_category
-                })
-            
-            return make_response(data={"info": result, "count": len(result)})
-        except Exception as db_error:
-            print(f"MongoDB查询失败，使用fallback数据: {db_error}")
-            # 使用INIT_DATA作为fallback
-            from app.models.db import INIT_DATA, get_db_connection
-            all_categories = INIT_DATA.get('cc_ServiceCategory', [])
-            
-            # 过滤数据
-            result = []
-            for cat in all_categories:
-                cat_bk_biz_id = cat.get('bk_biz_id')
-                # 处理metadata中的bk_biz_id
-                if not cat_bk_biz_id and 'metadata' in cat:
-                    if 'label' in cat['metadata']:
-                        cat_bk_biz_id = cat['metadata']['label'].get('bk_biz_id')
-                # 转换为整数进行比较
-                try:
-                    if cat_bk_biz_id:
-                        cat_bk_biz_id = int(cat_bk_biz_id)
-                except:
-                    cat_bk_biz_id = 0
-                # 根据业务ID过滤
-                if bk_biz_id == 0 or cat_bk_biz_id == bk_biz_id:
-                    result.append({
-                        "usage_amount": 0,
-                        "category": cat
-                    })
-            
-            return make_response(data={"info": result, "count": len(result)})
+            result.append({
+                "usage_amount": usage_amount,
+                "category": clean_category
+            })
+        
+        return make_response(data={"info": result, "count": len(result)})
     except Exception as e:
         import traceback
         traceback.print_exc()
@@ -1207,7 +1198,6 @@ def find_service_category_with_statistics():
 @admin_bp.route('/findmany/proc/service_category', methods=['POST'])
 def find_service_category():
     try:
-        # 兼容多种请求数据格式
         req_data = {}
         if request.is_json:
             req_data = request.get_json() or {}
@@ -1222,54 +1212,20 @@ def find_service_category():
         
         bk_biz_id = req_data.get('bk_biz_id', 0)
         
-        try:
-            # 尝试从MongoDB查询服务分类
-            collection = get_mongo_collection('cc_ServiceCategory')
-            
-            # 构建查询条件
-            query = {}
-            if bk_biz_id > 0:
-                # 搜索metadata.label.bk_biz_id字段
-                query["metadata.label.bk_biz_id"] = str(bk_biz_id)
-            
-            # 查询数据
-            categories = list(collection.find(query))
-            
-            # 移除_id字段，转换数据格式
-            result = []
-            for category in categories:
-                item = {}
-                for key, value in category.items():
-                    if key != '_id':
-                        item[key] = value
-                result.append(item)
-            
-            return make_response(data={"info": result, "count": len(result)})
-        except Exception as db_error:
-            print(f"MongoDB查询失败，使用fallback数据: {db_error}")
-            # 使用INIT_DATA作为fallback
-            from app.models.db import INIT_DATA, get_db_connection
-            all_categories = INIT_DATA.get('cc_ServiceCategory', [])
-            
-            # 过滤数据
-            result = []
-            for cat in all_categories:
-                cat_bk_biz_id = cat.get('bk_biz_id')
-                # 处理metadata中的bk_biz_id
-                if not cat_bk_biz_id and 'metadata' in cat:
-                    if 'label' in cat['metadata']:
-                        cat_bk_biz_id = cat['metadata']['label'].get('bk_biz_id')
-                # 转换为整数进行比较
-                try:
-                    if cat_bk_biz_id:
-                        cat_bk_biz_id = int(cat_bk_biz_id)
-                except:
-                    cat_bk_biz_id = 0
-                # 根据业务ID过滤
-                if bk_biz_id == 0 or cat_bk_biz_id == bk_biz_id:
-                    result.append(cat)
-            
-            return make_response(data={"info": result, "count": len(result)})
+        collection = get_mongo_collection('cc_ServiceCategory')
+        
+        query = {
+            "bk_biz_id": {"$in": [bk_biz_id, 0]}
+        }
+        
+        categories = list(collection.find(query).sort("name"))
+        
+        result = []
+        for category in categories:
+            item = {k: v for k, v in category.items() if k != '_id'}
+            result.append(item)
+        
+        return make_response(data={"info": result, "count": len(result)})
     except Exception as e:
         import traceback
         traceback.print_exc()
@@ -1281,7 +1237,6 @@ def find_service_category():
 @admin_bp.route('/create/proc/service_category', methods=['POST'])
 def create_service_category():
     try:
-        # 兼容多种请求数据格式
         req_data = {}
         if request.is_json:
             req_data = request.get_json() or {}
@@ -1295,16 +1250,56 @@ def create_service_category():
                 req_data = {}
         
         bk_biz_id = req_data.get('bk_biz_id', 0)
-        name = req_data.get('name', '')
+        name = req_data.get('name', '').strip()
         bk_parent_id = req_data.get('bk_parent_id', req_data.get('parent_id', 0))
-        bk_root_id = req_data.get('bk_root_id', bk_parent_id)
         
-        # 从MongoDB查询当前最大ID
+        if not name:
+            return make_response(result=False, code=400, message="name can't be empty")
+        
+        if len(name) > 128:
+            return make_response(result=False, code=400, message="name too long, max length is 128")
+        
+        import re
+        if not re.match(r'^[\w\-\s\u4e00-\u9fa5]+$', name):
+            return make_response(result=False, code=400, message="name not match regex, only supports letters, numbers, Chinese characters, underscores, hyphens and spaces")
+        
         collection = get_mongo_collection('cc_ServiceCategory')
+        
+        biz_filter = []
+        if bk_biz_id > 0:
+            biz_filter = [bk_biz_id]
+        
+        parent_filter = bk_parent_id if bk_parent_id > 0 else {"$ne": 0} if bk_parent_id == 0 else bk_parent_id
+        
+        unique_filter = {
+            "name": name,
+            "bk_parent_id": parent_filter,
+            "$or": [
+                {"bk_biz_id": bk_biz_id},
+                {"bk_biz_id": {"$in": biz_filter + [0]}}
+            ]
+        }
+        
+        if bk_parent_id == 0:
+            unique_filter["bk_parent_id"] = 0
+        else:
+            unique_filter["bk_parent_id"] = {"$ne": 0}
+        
+        existing = list(collection.find(unique_filter))
+        if len(existing) > 0:
+            return make_response(result=False, code=1408003, message=f"service category name duplicated: {name}")
+        
         max_id_doc = collection.find_one(sort=[("id", -1)])
         new_id = (max_id_doc.get("id", 0) + 1) if max_id_doc else 1
         
-        # 创建新服务分类 - 使用正确的字段名，与数据库初始化数据保持一致
+        bk_root_id = new_id
+        if bk_parent_id > 0:
+            parent = collection.find_one({"id": bk_parent_id})
+            if parent:
+                bk_root_id = parent.get("bk_root_id", bk_parent_id)
+            else:
+                return make_response(result=False, code=400, message="parent category not found")
+        
         new_category = {
             "id": new_id,
             "bk_biz_id": bk_biz_id,
@@ -1320,10 +1315,8 @@ def create_service_category():
             "metadata": {"label": {"bk_biz_id": str(bk_biz_id)}}
         }
         
-        # 插入数据库
         collection.insert_one(new_category)
         
-        # 返回结果，移除_id字段
         result = {k: v for k, v in new_category.items() if k != '_id'}
         
         return make_response(data=result)
@@ -1336,9 +1329,10 @@ def create_service_category():
 # 服务分类更新API
 @admin_bp.route('/api/v3/update/proc/service_category', methods=['PUT', 'POST'])
 @admin_bp.route('/update/proc/service_category', methods=['PUT', 'POST'])
-def update_service_category():
+@admin_bp.route('/api/v3/update/proc/service_category/<int:category_id>', methods=['PUT', 'POST'])
+@admin_bp.route('/update/proc/service_category/<int:category_id>', methods=['PUT', 'POST'])
+def update_service_category(category_id=None):
     try:
-        # 兼容多种请求数据格式
         req_data = {}
         if request.is_json:
             req_data = request.get_json() or {}
@@ -1351,33 +1345,52 @@ def update_service_category():
             except:
                 req_data = {}
         
-        category_id = req_data.get('id', 0)
+        if category_id is None:
+            category_id = req_data.get('id', 0)
+        
         if not category_id:
             return make_response(result=False, code=400, message="id is required")
         
-        # 从MongoDB查询服务分类
         collection = get_mongo_collection('cc_ServiceCategory')
         category = collection.find_one({"id": category_id})
         
         if not category:
             return make_response(result=False, code=404, message="service category not found")
         
-        # 准备更新数据 - 使用正确的字段名
-        update_data = {}
-        if 'name' in req_data:
-            update_data['name'] = req_data['name']
-        if 'bk_parent_id' in req_data:
-            update_data['bk_parent_id'] = req_data['bk_parent_id']
-        elif 'parent_id' in req_data:
-            update_data['bk_parent_id'] = req_data['parent_id']
+        if category.get('is_built_in', False):
+            return make_response(result=False, code=1202500, message="forbidden update built-in category")
         
-        update_data['modifier'] = 'admin'
-        update_data['last_time'] = '2024-01-01T00:00:00Z'
+        name = req_data.get('name', '').strip()
+        if name:
+            if len(name) > 128:
+                return make_response(result=False, code=400, message="name too long, max length is 128")
+            
+            import re
+            if not re.match(r'^[\w\-\s\u4e00-\u9fa5]+$', name):
+                return make_response(result=False, code=400, message="name not match regex")
+            
+            unique_filter = {
+                "name": name,
+                "bk_parent_id": category.get("bk_parent_id"),
+                "_id": {"$ne": category_id},
+                "$or": [
+                    {"bk_biz_id": category.get("bk_biz_id")},
+                    {"bk_biz_id": {"$in": [category.get("bk_biz_id"), 0]}}
+                ]
+            }
+            
+            existing = list(collection.find(unique_filter))
+            if len(existing) > 0:
+                return make_response(result=False, code=1408003, message=f"service category name duplicated: {name}")
+            
+            update_data = {
+                "name": name,
+                "modifier": "admin",
+                "last_time": "2024-01-01T00:00:00Z"
+            }
+            
+            collection.update_one({"id": category_id}, {"$set": update_data})
         
-        # 更新数据
-        collection.update_one({"id": category_id}, {"$set": update_data})
-        
-        # 获取更新后的数据
         updated_category = collection.find_one({"id": category_id})
         result = {k: v for k, v in updated_category.items() if k != '_id'}
         
@@ -1391,14 +1404,15 @@ def update_service_category():
 # 服务分类删除API
 @admin_bp.route('/api/v3/delete/proc/service_category', methods=['DELETE', 'POST'])
 @admin_bp.route('/delete/proc/service_category', methods=['DELETE', 'POST'])
-def delete_service_category():
+@admin_bp.route('/api/v3/delete/proc/service_category/<int:category_id>', methods=['DELETE', 'POST'])
+@admin_bp.route('/delete/proc/service_category/<int:category_id>', methods=['DELETE', 'POST'])
+def delete_service_category(category_id=None):
     try:
-        # 兼容多种请求数据格式
         req_data = {}
         if request.is_json:
             req_data = request.get_json() or {}
         elif request.form:
-            req_data = request.form.to_dict()
+            req_data = req_data.form.to_dict()
         elif request.data:
             try:
                 import json
@@ -1406,20 +1420,90 @@ def delete_service_category():
             except:
                 req_data = {}
         
-        category_id = req_data.get('id', 0)
+        if category_id is None:
+            category_id = req_data.get('id', 0)
         
-        # 从MongoDB删除服务分类
+        if not category_id:
+            return make_response(result=False, code=400, message="id is required")
+        
+        collection = get_mongo_collection('cc_ServiceCategory')
+        category = collection.find_one({"id": category_id})
+        
+        if not category:
+            return make_response(result=False, code=404, message="service category not found")
+        
+        children_filter = {
+            "bk_parent_id": category_id,
+            "id": {"$ne": category_id}
+        }
+        children_count = collection.count_documents(children_filter)
+        if children_count > 0:
+            return make_response(result=False, code=1202500, message="forbidden delete category has children node")
+        
+        service_template_collection = get_mongo_collection('cc_ServiceTemplate')
+        template_filter = {"service_category_id": category_id}
+        template_count = service_template_collection.count_documents(template_filter)
+        if template_count > 0:
+            return make_response(result=False, code=1202500, message="forbidden delete category be referenced by service template")
+        
+        module_collection = get_mongo_collection('cc_BaseModule')
+        module_filter = {"service_category_id": category_id}
+        module_count = module_collection.count_documents(module_filter)
+        if module_count > 0:
+            return make_response(result=False, code=1202500, message="forbidden delete category be referenced by module")
+        
+        collection.delete_one({"id": category_id})
+        
+        return make_response(data={"deleted_count": 1})
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return make_response(result=False, code=500, message=str(e))
+
+
+# 服务分类获取单个API
+@admin_bp.route('/api/v3/find/proc/service_category/<int:category_id>', methods=['GET'])
+@admin_bp.route('/find/proc/service_category/<int:category_id>', methods=['GET'])
+def get_service_category(category_id):
+    try:
+        if not category_id:
+            return make_response(result=False, code=400, message="id is required")
+        
+        collection = get_mongo_collection('cc_ServiceCategory')
+        category = collection.find_one({"id": category_id})
+        
+        if not category:
+            return make_response(result=False, code=404, message="service category not found")
+        
+        result = {k: v for k, v in category.items() if k != '_id'}
+        
+        return make_response(data=result)
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return make_response(result=False, code=500, message=str(e))
+
+
+# 服务分类获取默认API
+@admin_bp.route('/api/v3/find/proc/default_service_category', methods=['GET'])
+@admin_bp.route('/find/proc/default_service_category', methods=['GET'])
+def get_default_service_category():
+    try:
         collection = get_mongo_collection('cc_ServiceCategory')
         
-        # 构建查询条件
-        query = {}
-        if category_id > 0:
-            query["id"] = category_id
+        default_filter = {
+            "name": "Default",
+            "bk_parent_id": {"$ne": 0},
+            "bk_biz_id": 0
+        }
+        category = collection.find_one(default_filter)
         
-        # 执行删除
-        result = collection.delete_many(query)
+        if not category:
+            return make_response(result=False, code=404, message="default service category not found")
         
-        return make_response(data={"deleted_count": result.deleted_count})
+        result = {k: v for k, v in category.items() if k != '_id'}
+        
+        return make_response(data=result)
     except Exception as e:
         import traceback
         traceback.print_exc()
