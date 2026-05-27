@@ -91,18 +91,50 @@ func (m *user) LoginUser(c *gin.Context, config map[string]string, isMultiOwner 
 | IsOwner | false | 是否所有者 |
 | Language | 从请求获取 | 语言设置 |
 
-## 四、版本标识
+## 四、支持的登录版本
+
+BK-CMDB支持多种登录方式，通过 `webServer.login.version` 配置项切换：
+
+| 版本值 | 说明 | 使用场景 |
+|--------|------|----------|
+| `skip-login` | 免登录模式，直接使用admin账号 | 开发环境、测试环境 |
+| `blueking` | 使用蓝鲸PaaS平台登录 | 正式环境（接入蓝鲸平台） |
+| `opensource` | 开源版登录（用户名密码） | 正式环境（开源部署） |
+
+### 4.1 配置位置
+
+在配置文件（config.yaml）中的位置：
+
+```yaml
+webServer:
+  login:
+    # 使用的登录系统
+    version: skip-login
+```
+
+### 4.2 版本标识常量
 
 在 `src/common/definitions.go` 中定义版本常量：
 
 ```go
-// BKSkipLoginPluginVersion TODO
-BKSkipLoginPluginVersion = "skip-login"
+// 登录版本常量定义
+BKBluekingLoginPluginVersion = "blueking"    // 蓝鲸登录
+BKOpenSourceLoginPluginVersion = "opensource" // 开源版登录
+BKSkipLoginPluginVersion = "skip-login"       // 免登录
 ```
 
-该值在配置文件中用于指定使用哪种登录插件。
+### 4.3 代码引用位置
 
-## 五、工作流程
+- **配置读取**：`src/web_server/app/server.go:152`
+  ```go
+  w.Config.LoginVersion, _ = cc.String("webServer.login.version")
+  ```
+- **插件选择**：`src/web_server/middleware/user/public.go:50`
+  ```go
+  user := plugins.CurrentPlugin(c, m.config.LoginVersion)
+  ```
+
+## 五、核心登录逻辑
 
 ### 5.1 配置触发
 
@@ -146,17 +178,7 @@ func (m *user) GetUserList(c *gin.Context, config map[string]string) ([]*metadat
 }
 ```
 
-## 七、与Python实现的对比
-
-| 特性 | Go实现 | Python实现 |
-|------|--------|------------|
-| 配置方式 | config.yaml | 环境变量 `SKIP_LOGIN=true` |
-| 配置键 | `webServer.login.version = "skip-login"` | `SKIP_LOGIN=true` |
-| 默认用户 | admin | admin（可配置 `SKIP_LOGIN_USER`） |
-| Cookie处理 | `BKHTTPOwnerID` | `bk_token` |
-| 会话管理 | Redis Session | Python Session |
-
-## 八、安全注意事项
+## 七、安全注意事项
 
 **⚠️ 重要提醒**：
 - Skip Login仅用于开发环境
@@ -164,7 +186,7 @@ func (m *user) GetUserList(c *gin.Context, config map[string]string) ([]*metadat
 - 启用后会绕过所有身份验证机制
 - 所有请求都会以admin身份执行
 
-## 九、适用场景
+## 八、适用场景
 
 - 本地开发调试
 - 自动化测试环境
