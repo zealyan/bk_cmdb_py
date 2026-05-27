@@ -1144,8 +1144,12 @@ def find_service_category_with_statistics():
         
         collection = get_mongo_collection('cc_ServiceCategory')
         
+        # 查询条件：支持两种形式的 bk_biz_id 存在
         query = {
-            "bk_biz_id": {"$in": [bk_biz_id, 0]}
+            "$or": [
+                {"bk_biz_id": {"$in": [bk_biz_id, 0]}},
+                {"metadata.label.bk_biz_id": {"$in": [str(bk_biz_id), "0"]}}
+            ]
         }
         
         categories = list(collection.find(query).sort("name"))
@@ -1157,7 +1161,10 @@ def find_service_category_with_statistics():
         service_template_collection = get_mongo_collection('cc_ServiceTemplate')
         template_filter = {
             "service_category_id": {"$in": category_ids},
-            "bk_biz_id": bk_biz_id
+            "$or": [
+                {"bk_biz_id": bk_biz_id},
+                {"metadata.label.bk_biz_id": str(bk_biz_id)}
+            ]
         }
         service_templates = list(service_template_collection.find(template_filter))
         for tpl in service_templates:
@@ -1168,7 +1175,10 @@ def find_service_category_with_statistics():
         module_collection = get_mongo_collection('cc_BaseModule')
         module_filter = {
             "service_category_id": {"$in": category_ids},
-            "bk_biz_id": bk_biz_id
+            "$or": [
+                {"bk_biz_id": bk_biz_id},
+                {"metadata.label.bk_biz_id": str(bk_biz_id)}
+            ]
         }
         modules = list(module_collection.find(module_filter))
         for mod in modules:
@@ -1179,6 +1189,16 @@ def find_service_category_with_statistics():
         result = []
         for category in categories:
             clean_category = {k: v for k, v in category.items() if k != '_id'}
+            # 确保返回的数据有 bk_biz_id 字段
+            if 'bk_biz_id' not in clean_category:
+                if 'metadata' in clean_category and 'label' in clean_category['metadata'] and 'bk_biz_id' in clean_category['metadata']['label']:
+                    try:
+                        clean_category['bk_biz_id'] = int(clean_category['metadata']['label']['bk_biz_id'])
+                    except:
+                        clean_category['bk_biz_id'] = 0
+                else:
+                    clean_category['bk_biz_id'] = 0
+            
             usage_amount = usage_map.get(category.get("id"), 0)
             
             result.append({
@@ -1214,8 +1234,12 @@ def find_service_category():
         
         collection = get_mongo_collection('cc_ServiceCategory')
         
+        # 查询条件：支持两种形式的 bk_biz_id 存在
         query = {
-            "bk_biz_id": {"$in": [bk_biz_id, 0]}
+            "$or": [
+                {"bk_biz_id": {"$in": [bk_biz_id, 0]}},
+                {"metadata.label.bk_biz_id": {"$in": [str(bk_biz_id), "0"]}}
+            ]
         }
         
         categories = list(collection.find(query).sort("name"))
@@ -1223,6 +1247,15 @@ def find_service_category():
         result = []
         for category in categories:
             item = {k: v for k, v in category.items() if k != '_id'}
+            # 确保返回的数据有 bk_biz_id 字段
+            if 'bk_biz_id' not in item:
+                if 'metadata' in item and 'label' in item['metadata'] and 'bk_biz_id' in item['metadata']['label']:
+                    try:
+                        item['bk_biz_id'] = int(item['metadata']['label']['bk_biz_id'])
+                    except:
+                        item['bk_biz_id'] = 0
+                else:
+                    item['bk_biz_id'] = 0
             result.append(item)
         
         return make_response(data={"info": result, "count": len(result)})
