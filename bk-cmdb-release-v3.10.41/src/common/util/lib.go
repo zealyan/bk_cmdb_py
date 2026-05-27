@@ -56,9 +56,22 @@ func GetOwnerID(header http.Header) string {
 // SetOwnerIDAndAccount TODO
 // set supplier id and account in head
 func SetOwnerIDAndAccount(req *restful.Request) {
+	// 处理传统的请求头
 	owner := req.Request.Header.Get(common.BKHTTPOwner)
 	if "" != owner {
 		req.Request.Header.Set(common.BKHTTPOwnerID, owner)
+	}
+	
+	// 添加对 X-Bk-Owner-Id 的支持
+	xOwnerId := req.Request.Header.Get("X-Bk-Owner-Id")
+	if "" != xOwnerId {
+		req.Request.Header.Set(common.BKHTTPOwnerID, xOwnerId)
+	}
+	
+	// 添加对 X-Bk-User 的支持
+	xUser := req.Request.Header.Get("X-Bk-User")
+	if "" != xUser {
+		req.Request.Header.Set(common.BKHTTPHeaderUser, xUser)
 	}
 }
 

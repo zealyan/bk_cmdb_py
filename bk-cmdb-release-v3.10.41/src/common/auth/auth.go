@@ -25,7 +25,7 @@ var EnableAuth = "true"
 var enableAuth = true
 
 // EnableAuthFlag TODO
-var EnableAuthFlag *authValue
+var EnableAuthFlag = &authValue{}
 var once = sync.Once{}
 
 type authValue struct{}

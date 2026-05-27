@@ -21,7 +21,8 @@ wheels/
 *.egg
 
 # Nodejs
-ui/node_modules
+*/node_modules/
+bk-cmdb-release-v3.10.41/src/ui/node_modules
 
 # Virtual Environment
 venv/

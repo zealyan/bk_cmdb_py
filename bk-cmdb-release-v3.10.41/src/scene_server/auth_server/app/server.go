@@ -20,6 +20,7 @@ import (
 
 	"configcenter/src/ac/iam"
 	"configcenter/src/apimachinery/util"
+	"configcenter/src/common/auth"
 	"configcenter/src/common/backbone"
 	cc "configcenter/src/common/backbone/configcenter"
 	"configcenter/src/common/blog"
@@ -27,7 +28,7 @@ import (
 	"configcenter/src/common/types"
 	"configcenter/src/scene_server/auth_server/app/options"
 	"configcenter/src/scene_server/auth_server/logics"
-	"configcenter/src/scene_server/auth_server/sdk/auth"
+	sdkauth "configcenter/src/scene_server/auth_server/sdk/auth"
 	"configcenter/src/scene_server/auth_server/sdk/client"
 	sdktypes "configcenter/src/scene_server/auth_server/sdk/types"
 	"configcenter/src/scene_server/auth_server/service"
@@ -61,6 +62,14 @@ func Run(ctx context.Context, cancel context.CancelFunc, op *options.ServerOptio
 			continue
 		}
 
+		// Check if auth is enabled
+		if !auth.EnableAuthorize() {
+			blog.Info("auth is disabled, skip iam client initialization")
+			lgc := logics.NewLogics(engine.CoreAPI)
+			authServer.Service = service.NewAuthService(engine, nil, lgc, nil)
+			break
+		}
+
 		authConf := authServer.Config.Auth
 		iamConf := sdktypes.IamConfig{
 			Address:   authConf.Address,
@@ -84,7 +93,7 @@ func Run(ctx context.Context, cancel context.CancelFunc, op *options.ServerOptio
 			Iam:     iamConf,
 			Options: opt,
 		}
-		authorizer, err := auth.NewAuth(authConfig, lgc)
+		authorizer, err := sdkauth.NewAuth(authConfig, lgc)
 		if err != nil {
 			return fmt.Errorf("new authorize failed, err: %v", err)
 		}

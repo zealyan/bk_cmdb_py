@@ -88,6 +88,9 @@ func (u *URLPath) WithTopo(req *restful.Request) (isHit bool) {
 	case strings.HasPrefix(string(*u), rootPath+"/biz/"):
 		from, to, isHit = rootPath+"/biz", topoRoot+"/app", true
 
+	case string(*u) == rootPath+"/biz":
+		from, to, isHit = rootPath+"/biz", topoRoot+"/app", true
+
 	case strings.HasPrefix(string(*u), rootPath+"/topo/"):
 		from, to, isHit = rootPath, topoRoot, true
 
