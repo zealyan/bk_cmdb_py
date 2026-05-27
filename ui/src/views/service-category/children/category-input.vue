@@ -16,8 +16,6 @@
       :ref="inputRef"
       :placeholder="placeholder"
       v-model="localValue"
-      v-validate="validateRules"
-      :name="vid"
       @enter="handleConfirm">
     </bk-input>
     <div class="operation">
@@ -48,14 +46,6 @@
       editId: {
         type: Number,
         default: 0
-      },
-      vid: {
-        type: String,
-        default: 'categoryInput'
-      },
-      validateRules: {
-        type: String,
-        default: 'required|namedCharacter|length:128'
       }
     },
     data() {

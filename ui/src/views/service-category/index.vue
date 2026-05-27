@@ -37,7 +37,8 @@
               ref="editInput"
               :input-ref="'categoryInput'"
               :placeholder="$t('请输入一级分类')"
-              :vid="'mainCategory_' + mainCategory['id']"
+              name="categoryName"
+              v-validate="'required|namedCharacter|length:128'"
               v-model="mainCategoryName"
               @on-confirm="handleEditCategory(mainCategory, 'main', index)"
               @on-cancel="handleCloseEditMain">
@@ -110,7 +111,8 @@
               ref="editInput"
               :input-ref="'categoryInput'"
               :placeholder="$t('请输入二级分类')"
-              :vid="'childCategory_' + childCategory['id']"
+              name="categoryName"
+              v-validate="'required|namedCharacter|length:128'"
               v-model="childCategoryName"
               @on-confirm="handleEditCategory(childCategory, 'child', index)"
               @on-cancel="handleCloseEditChild">
@@ -173,7 +175,8 @@
               :input-ref="'categoryInput'"
               :placeholder="$t('请输入二级分类')"
               :edit-id="mainCategory['bk_root_id']"
-              :vid="'addChildCategory_' + mainCategory['id']"
+              name="categoryName"
+              v-validate="'required|namedCharacter|length:128'"
               v-model="categoryName"
               @on-confirm="handleAddCategory"
               @on-cancel="handleCloseAddChild">
@@ -191,7 +194,8 @@
               ref="addCategoryInput"
               :input-ref="'categoryInput'"
               :placeholder="$t('请输入一级分类')"
-              vid="addMainCategory"
+              name="categoryName"
+              v-validate="'required|namedCharacter|length:128'"
               v-model="categoryName"
               @on-confirm="handleAddCategory"
               @on-cancel="handleCloseAddBox">
@@ -339,10 +343,9 @@
         tipsInstance.reference.parentElement.classList[willShow ? 'add' : 'remove']('tips-active')
       },
       async handleAddCategory(name, bk_root_id = 0) {
-        const vid = bk_root_id > 0 ? `addChildCategory_${bk_root_id}` : 'addMainCategory'
-        if (!await this.$validator.validate(vid)) {
+        if (!await this.$validator.validateAll()) {
           this.$bkMessage({
-            message: this.errors.first(vid) || this.$t('请输入分类名称'),
+            message: this.errors.first('categoryName') || this.$t('请输入分类名称'),
             theme: 'error'
           })
         } else {
@@ -350,10 +353,9 @@
         }
       },
       async handleEditCategory(data, type, mainIndex) {
-        const vid = type === 'main' ? `mainCategory_${data.id}` : `childCategory_${data.id}`
-        if (!await this.$validator.validate(vid)) {
+        if (!await this.$validator.validateAll()) {
           this.$bkMessage({
-            message: this.errors.first(vid) || this.$t('请输入分类名称'),
+            message: this.errors.first('categoryName') || this.$t('请输入分类名称'),
             theme: 'error'
           })
         } else if (data.name === this.mainCategoryName || data.name === this.childCategoryName) {
@@ -428,6 +430,7 @@
       handleCloseEditMain() {
         this.editMainStatus = null
         this.isMainAuthCompleted = false
+        this.$validator.reset()
       },
       handleEditChild(id, name) {
         this.editChildStatus = id
@@ -441,6 +444,7 @@
       },
       handleCloseEditChild() {
         this.editChildStatus = null
+        this.$validator.reset()
       },
       handleAddBox() {
         this.showAddMianCategory = true
@@ -451,6 +455,7 @@
       handleCloseAddBox() {
         this.showAddMianCategory = false
         this.categoryName = ''
+        this.$validator.reset()
       },
       handleShowAddChild(id) {
         this.addChildStatus = id
@@ -462,6 +467,7 @@
       handleCloseAddChild() {
         this.addChildStatus = null
         this.categoryName = ''
+        this.$validator.reset()
       }
     }
   }
