@@ -1,3 +1,4 @@
+from datetime import datetime
 from flask import Blueprint, jsonify, request
 from app.models.db import db, get_db_connection, get_mongo_collection
 
@@ -147,29 +148,39 @@ def find_object_attr():
             collection = get_mongo_collection('cc_ObjAttDes')
             docs = collection.find({"bk_obj_id": {"$in": obj_ids}})
             # 简单的排序
-            docs_sorted = sorted(docs, key=lambda x: x.get("id", 0))
+            docs_sorted = sorted(docs, key=lambda x: x.get("bk_property_index", x.get("id", 0)))
             for doc in docs_sorted:
-                # 转换字段格式，匹配前端期望的字段名
+                # 转换字段格式，匹配Go原版API返回的字段结构
                 attr = {
                     "id": doc.get("id"),
+                    "bk_supplier_account": doc.get("bk_supplier_account", "0"),
                     "bk_obj_id": doc.get("bk_obj_id"),
                     "bk_property_id": doc.get("bk_property_id"),
                     "bk_property_name": doc.get("bk_property_name"),
                     "bk_property_type": doc.get("bk_property_type"),
-                    "bk_property_group": doc.get("bk_property_group"),
-                    "bk_property_index": doc.get("id"),  # 使用 id 作为排序
-                    "isreadonly": doc.get("is_readonly"),
-                    "isrequired": doc.get("is_required"),
-                    "ispre": doc.get("is_pre"),
-                    "isonly": doc.get("is_only"),
-                    "bk_issystem": doc.get("bk_is_system"),
-                    "bk_isapi": doc.get("bk_is_api"),
-                    "default": doc.get("default")
+                    "bk_property_group": doc.get("bk_property_group", "default"),
+                    "bk_property_index": doc.get("bk_property_index", 0),
+                    "unit": doc.get("unit", ""),
+                    "placeholder": doc.get("placeholder", ""),
+                    "editable": doc.get("editable", True),
+                    "ispre": doc.get("is_pre", False),
+                    "isrequired": doc.get("is_required", False),
+                    "isreadonly": doc.get("isreadonly", doc.get("is_readonly", False)),
+                    "isonly": doc.get("is_only", False),
+                    "bk_issystem": doc.get("bk_issystem", doc.get("bk_is_system", False)),
+                    "bk_isapi": doc.get("bk_isapi", doc.get("bk_is_api", False)),
+                    "option": doc.get("option", ""),
+                    "description": doc.get("description", ""),
+                    "creator": doc.get("creator", ""),
+                    "create_time": doc.get("create_time", ""),
+                    "last_time": doc.get("last_time", ""),
+                    "bk_property_group_name": doc.get("bk_property_group", "default")
                 }
-                # 确保所有字段都有默认值
-                for key in ["isreadonly", "isrequired", "ispre", "isonly", "bk_issystem", "bk_isapi"]:
-                    if attr.get(key) is None:
-                        attr[key] = False
+                # 确保布尔字段有正确的默认值
+                if attr.get("editable") is None:
+                    attr["editable"] = True
+                if attr.get("isreadonly") is None:
+                    attr["isreadonly"] = False
                 all_attributes.append(attr)
         
         return make_response(data=all_attributes)
@@ -507,12 +518,26 @@ def search_instances_by_obj(obj_id):
         sort = page.get('sort', 'bk_inst_id')
         
         try:
-            collection_name = f"cc_InstBase_{obj_id}"
-            collection = get_mongo_collection(collection_name)
+            if obj_id == 'biz':
+                collection_name = 'cc_ApplicationBase'
+                query = conditions if conditions else {"bk_data_status": {"$ne": "disabled"}}
+            elif obj_id == 'set':
+                collection_name = 'cc_SetBase'
+                query = conditions if conditions else {}
+            elif obj_id == 'module':
+                collection_name = 'cc_ModuleBase'
+                query = conditions if conditions else {}
+            elif obj_id == 'host':
+                collection_name = 'cc_HostBase'
+                query = conditions if conditions else {}
+            elif obj_id == 'cloud_area':
+                collection_name = 'cc_PlatBase'
+                query = conditions if conditions else {}
+            else:
+                collection_name = f"cc_InstBase_{obj_id}"
+                query = conditions if conditions else {}
             
-            query = {}
-            if conditions:
-                query = conditions
+            collection = get_mongo_collection(collection_name)
             
             cursor = collection.find(query)
             
@@ -639,6 +664,9 @@ def find_topo_inst_with_statistics(bk_biz_id):
             # 如果没有任何业务，返回空结构
             return make_response(data=[])
         
+        # 查询主机-模块关系
+        host_relations = list(conn.cc_HostModuleRelation.find({"bk_biz_id": business.get("bk_biz_id")}))
+        
         # 查询该业务下的所有集群
         sets = list(conn.cc_SetBase.find({"bk_biz_id": business.get("bk_biz_id"), "bk_data_status": {"$ne": "disabled"}}))
         
@@ -647,6 +675,8 @@ def find_topo_inst_with_statistics(bk_biz_id):
         
         # 构建集群节点
         set_nodes = []
+        total_host_count = 0
+        
         for s in sets:
             set_id = s.get("bk_set_id")
             # 查找该集群下的所有模块
@@ -654,20 +684,28 @@ def find_topo_inst_with_statistics(bk_biz_id):
             
             # 构建模块节点
             module_nodes = []
+            set_host_count = 0
             for m in set_modules:
+                module_id = m.get("bk_module_id")
+                # 统计该模块下的主机数
+                module_hosts = [r for r in host_relations if r.get("bk_module_id") == module_id]
+                host_count = len(module_hosts)
+                set_host_count += host_count
+                
                 module_node = {
                     "bk_obj_id": "module",
                     "bk_obj_name": "模块",
                     "bk_inst_id": m.get("bk_module_id"),
                     "bk_inst_name": m.get("bk_module_name"),
-                    "default": 0,
+                    "default": m.get("bk_default", 0),
                     "child": [],
-                    "host_count": 0,
+                    "host_count": host_count,
                     "service_instance_count": 0
                 }
                 module_nodes.append(module_node)
             
             # 构建集群节点
+            total_host_count += set_host_count
             set_node = {
                 "bk_obj_id": "set",
                 "bk_obj_name": "集群",
@@ -675,7 +713,7 @@ def find_topo_inst_with_statistics(bk_biz_id):
                 "bk_inst_name": s.get("bk_set_name"),
                 "default": 0,
                 "child": module_nodes,
-                "host_count": 0,
+                "host_count": set_host_count,
                 "service_instance_count": 0
             }
             set_nodes.append(set_node)
@@ -686,9 +724,9 @@ def find_topo_inst_with_statistics(bk_biz_id):
             "bk_obj_name": "业务",
             "bk_inst_id": business.get("bk_biz_id"),
             "bk_inst_name": business.get("bk_biz_name"),
-            "default": 0,
+            "default": business.get("bk_default", 0),
             "child": set_nodes,
-            "host_count": 0,
+            "host_count": total_host_count,
             "service_instance_count": 0
         }
         
@@ -702,11 +740,17 @@ def find_topo_inst_with_statistics(bk_biz_id):
 
 
 
+
+
 @object_bp.route('/api/v3/find/topoinstnode/host_serviceinst_count/<int:biz_id>', methods=['POST'])
 @object_bp.route('/find/topoinstnode/host_serviceinst_count/<int:biz_id>', methods=['POST'])
 def find_topoinstnode_host_serviceinst_count(biz_id):
     """获取拓扑节点的主机和服务实例统计信息"""
     try:
+        conn = get_db_connection()
+        if conn is None:
+            return make_response(result=False, code=500, message="数据库连接失败")
+        
         # 兼容多种请求数据格式
         req_data = {}
         if request.is_json:
@@ -722,17 +766,437 @@ def find_topoinstnode_host_serviceinst_count(biz_id):
         
         conditions = req_data.get('condition', [])
         
-        # 为每个节点返回统计数据（当前返回默认值）
+        # 查询主机-模块关系
+        host_relations = list(conn.cc_HostModuleRelation.find({"bk_biz_id": biz_id}))
+        
+        # 为每个节点返回统计数据
         result = []
         for node in conditions:
+            bk_obj_id = node.get('bk_obj_id')
+            bk_inst_id = node.get('bk_inst_id')
+            
+            host_count = 0
+            if bk_obj_id == "module":
+                # 统计模块下的主机
+                host_count = len([r for r in host_relations if r.get("bk_module_id") == bk_inst_id])
+            elif bk_obj_id == "set":
+                # 统计集群下的主机
+                host_count = len([r for r in host_relations if r.get("bk_set_id") == bk_inst_id])
+            elif bk_obj_id == "biz":
+                # 统计业务下的所有主机
+                host_count = len(host_relations)
+            
             result.append({
-                "bk_obj_id": node.get('bk_obj_id'),
-                "bk_inst_id": node.get('bk_inst_id'),
-                "host_count": 0,
+                "bk_obj_id": bk_obj_id,
+                "bk_inst_id": bk_inst_id,
+                "host_count": host_count,
                 "service_instance_count": 0
             })
         
         return make_response(data=result)
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return make_response(result=False, code=500, message=str(e))
+
+
+@object_bp.route('/api/v3/create/instance/object/<obj_id>', methods=['POST'])
+@object_bp.route('/create/instance/object/<obj_id>', methods=['POST'])
+def create_instance(obj_id):
+    """创建对象实例"""
+    try:
+        req_data = {}
+        if request.is_json:
+            req_data = request.get_json() or {}
+        elif request.form:
+            req_data = request.form.to_dict()
+        elif request.data:
+            try:
+                import json
+                req_data = json.loads(request.data)
+            except:
+                req_data = {}
+        
+        # 获取实例数据
+        instance_data = req_data
+        
+        # 过滤掉None值，但保留空字符串和0
+        instance_data = {k: v for k, v in instance_data.items() if v is not None}
+        
+        # 获取下一个实例ID
+        collection_name = f"cc_InstBase_{obj_id}"
+        collection = get_mongo_collection(collection_name)
+        
+        # 获取当前最大ID
+        max_doc = collection.find_one(sort=[("bk_inst_id", -1)])
+        next_id = 1 if max_doc is None else max_doc.get("bk_inst_id", 0) + 1
+        
+        # 设置实例ID和基础字段
+        instance_data["bk_inst_id"] = next_id
+        instance_data.setdefault("bk_supplier_account", "0")
+        instance_data.setdefault("bk_data_status", "active")
+        instance_data.setdefault("create_time", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+        instance_data.setdefault("last_time", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+        
+        # 插入数据库
+        result = collection.insert_one(instance_data)
+        
+        if result.inserted_id:
+            return make_response(data={
+                "bk_inst_id": next_id,
+                "id": next_id
+            })
+        else:
+            return make_response(result=False, code=500, message="创建实例失败")
+            
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return make_response(result=False, code=500, message=str(e))
+
+
+
+
+@object_bp.route('/api/v3/find/topoinst/biz/<int:bk_biz_id>', methods=['POST'])
+@object_bp.route('/find/topoinst/biz/<int:bk_biz_id>', methods=['POST'])
+def find_business_topo_inst(bk_biz_id):
+    """搜索业务拓扑实例"""
+    try:
+        conn = get_db_connection()
+        if conn is None:
+            return make_response(result=False, code=500, message="数据库连接失败")
+
+        # 查询业务信息
+        business = conn.cc_ApplicationBase.find_one({"bk_biz_id": bk_biz_id})
+        if not business:
+            # 如果没有找到指定业务，返回第一个启用的业务
+            business = conn.cc_ApplicationBase.find_one({"bk_data_status": {"$ne": "disabled"}})
+        
+        if not business:
+            return make_response(result=False, code=404, message="业务不存在")
+
+        biz_id = business.get("bk_biz_id")
+        biz_name = business.get("bk_biz_name", "")
+
+        # 构建拓扑结构
+        topo_result = []
+        
+        # 添加业务节点
+        biz_node = {
+            "bk_inst_id": biz_id,
+            "bk_inst_name": biz_name,
+            "bk_obj_id": "biz",
+            "bk_obj_name": "业务",
+            "children": []
+        }
+        
+        # 查询该业务下的所有集群
+        sets = list(conn.cc_SetBase.find({
+            "bk_biz_id": biz_id,
+            "bk_data_status": {"$ne": "disabled"}
+        }).sort("bk_set_name", 1))
+        
+        for s in sets:
+            set_node = {
+                "bk_inst_id": s.get("bk_set_id"),
+                "bk_inst_name": s.get("bk_set_name", ""),
+                "bk_obj_id": "set",
+                "bk_obj_name": "集群",
+                "children": []
+            }
+            
+            # 查询该集群下的所有模块
+            modules = list(conn.cc_ModuleBase.find({
+                "bk_set_id": s.get("bk_set_id"),
+                "bk_biz_id": biz_id,
+                "bk_data_status": {"$ne": "disabled"}
+            }).sort("bk_module_name", 1))
+            
+            for m in modules:
+                module_node = {
+                    "bk_inst_id": m.get("bk_module_id"),
+                    "bk_inst_name": m.get("bk_module_name", ""),
+                    "bk_obj_id": "module",
+                    "bk_obj_name": "模块",
+                    "children": []
+                }
+                set_node["children"].append(module_node)
+            
+            biz_node["children"].append(set_node)
+        
+        topo_result.append(biz_node)
+        
+        return make_response(data=topo_result)
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return make_response(result=False, code=500, message=str(e))
+
+
+@object_bp.route('/api/v3/findmany/resource/directory', methods=['POST'])
+@object_bp.route('/findmany/resource/directory', methods=['POST'])
+def findmany_resource_directory():
+    """搜索资源目录"""
+    try:
+        from app.models.db import get_db_connection
+        conn = get_db_connection()
+        if conn is None:
+            return make_response(result=False, code=500, message="数据库连接失败")
+
+        req_data = {}
+        if request.is_json:
+            req_data = request.get_json() or {}
+        elif request.form:
+            req_data = request.form.to_dict()
+        elif request.data:
+            try:
+                import json
+                req_data = json.loads(request.data)
+            except:
+                req_data = {}
+
+        # 获取资源池相关ID
+        # 查找默认业务（资源池业务 bk_default = 1）
+        resource_pool_biz = conn.cc_ApplicationBase.find_one({"bk_default": 1})
+        if not resource_pool_biz:
+            resource_pool_biz = conn.cc_ApplicationBase.find_one({"bk_biz_id": {"$ne": None}})
+        
+        if not resource_pool_biz:
+            return make_response(data={"count": 0, "info": []})
+        
+        biz_id = resource_pool_biz.get("bk_biz_id")
+        
+        # 查询主机-模块关系
+        host_relations = list(conn.cc_HostModuleRelation.find({"bk_biz_id": biz_id}))
+        
+        # 查找资源池集群
+        resource_pool_set = conn.cc_SetBase.find_one({"bk_biz_id": biz_id})
+        if not resource_pool_set:
+            return make_response(data={"count": 0, "info": []})
+        
+        set_id = resource_pool_set.get("bk_set_id")
+        
+        # 构建查询条件
+        condition = req_data.get("condition", {})
+        if not condition:
+            condition = {}
+        condition["bk_biz_id"] = biz_id
+        condition["bk_set_id"] = set_id
+        
+        # 字段和分页
+        fields = req_data.get("fields", [])
+        page = req_data.get("page", {})
+        sort = page.get("sort", "bk_module_name")
+        is_fuzzy = req_data.get("is_fuzzy", False)
+        
+        # 确保有必要字段
+        if "bk_module_id" not in fields:
+            fields.append("bk_module_id")
+        if "bk_module_name" not in fields:
+            fields.append("bk_module_name")
+        
+        # 构建查询
+        query = {}
+        for k, v in condition.items():
+            if is_fuzzy and isinstance(v, str):
+                query[k] = {"$regex": v, "$options": "i"}
+            else:
+                query[k] = v
+        
+        # 执行查询
+        cursor = conn.cc_ModuleBase.find(query)
+        
+        # 排序
+        if sort:
+            sort_dir = 1
+            if sort.startswith("-"):
+                sort_dir = -1
+                sort = sort[1:]
+            cursor = cursor.sort(sort, sort_dir)
+        
+        # 获取数据
+        modules = list(cursor)
+        count = len(modules)
+        
+        # 分离空闲机模块和其他模块
+        idle_module_id = 0
+        module_list = []
+        module_map = {}
+        
+        for m in modules:
+            m.pop("_id", None)
+            module_id = m.get("bk_module_id")
+            module_map[module_id] = m
+            
+            bk_default = m.get("bk_default", 0)
+            if bk_default == 1:
+                idle_module_id = module_id
+            else:
+                module_list.append(module_id)
+        
+        # 空闲机放在第一位
+        if idle_module_id:
+            module_list.insert(0, idle_module_id)
+        
+        # 统计每个模块的主机数量
+        result = []
+        for module_id in module_list:
+            module_info = module_map[module_id]
+            # 统计该模块下的主机
+            module_hosts = [r for r in host_relations if r.get("bk_module_id") == module_id]
+            module_info["host_count"] = len(module_hosts)
+            result.append(module_info)
+        
+        return make_response(data={"count": count, "info": result})
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return make_response(result=False, code=500, message=str(e))
+
+
+@object_bp.route('/api/v3/find/module/host/relation/<int:bk_biz_id>', methods=['POST'])
+@object_bp.route('/find/module/host/relation/<int:bk_biz_id>', methods=['POST'])
+def find_module_host_relation(bk_biz_id):
+    """根据模块ID查找主机关联关系"""
+    try:
+        conn = get_db_connection()
+        if conn is None:
+            return make_response(result=False, code=500, message="数据库连接失败")
+
+        # 获取请求数据
+        req_data = {}
+        if request.is_json:
+            req_data = request.get_json() or {}
+        elif request.form:
+            req_data = request.form.to_dict()
+        elif request.data:
+            try:
+                import json
+                req_data = json.loads(request.data)
+            except:
+                req_data = {}
+
+        module_ids = req_data.get("bk_module_ids", [])
+        host_fields = req_data.get("host_fields", [])
+        module_fields = req_data.get("module_fields", [])
+        page = req_data.get("page", {})
+
+        start = page.get("start", 0)
+        limit = page.get("limit", 20)
+        sort = page.get("sort", "bk_host_id")
+
+        # 查询主机-模块关系
+        if module_ids:
+            host_relations = list(conn.cc_HostModuleRelation.find({
+                "bk_biz_id": bk_biz_id,
+                "bk_module_id": {"$in": module_ids}
+            }))
+        else:
+            host_relations = list(conn.cc_HostModuleRelation.find({
+                "bk_biz_id": bk_biz_id
+            }))
+
+        # 获取主机ID列表
+        host_ids = [rel.get("bk_host_id") for rel in host_relations]
+
+        if not host_ids:
+            return make_response(data={
+                "count": 0,
+                "relation": []
+            })
+
+        # 查询主机信息
+        query = {"bk_host_id": {"$in": host_ids}}
+        cursor = conn.cc_HostBase.find(query)
+
+        # 排序
+        if sort:
+            sort_dir = 1
+            if sort.startswith("-"):
+                sort_dir = -1
+                sort = sort[1:]
+            cursor = cursor.sort(sort, sort_dir)
+
+        # 总数
+        total_count = conn.cc_HostBase.count_documents(query)
+
+        # 分页
+        cursor = cursor.skip(start).limit(limit)
+
+        # 获取主机
+        hosts = []
+        for doc in cursor:
+            doc.pop("_id", None)
+            if host_fields:
+                filtered_host = {}
+                for field in host_fields:
+                    if field in doc:
+                        filtered_host[field] = doc[field]
+                hosts.append(filtered_host)
+            else:
+                hosts.append(doc)
+
+        if not hosts:
+            return make_response(data={
+                "count": total_count,
+                "relation": []
+            })
+
+        # 构建主机关联关系
+        host_id_list = [host.get("bk_host_id") for host in hosts]
+
+        # 查询这些主机的模块关系
+        host_module_map = {}
+        module_id_set = set()
+        for rel in host_relations:
+            host_id = rel.get("bk_host_id")
+            if host_id in host_id_list:
+                if host_id not in host_module_map:
+                    host_module_map[host_id] = []
+                module_id = rel.get("bk_module_id")
+                host_module_map[host_id].append(module_id)
+                module_id_set.add(module_id)
+
+        # 查询模块信息
+        modules = []
+        if module_id_set:
+            module_query = {"bk_module_id": {"$in": list(module_id_set)}}
+            module_cursor = conn.cc_ModuleBase.find(module_query)
+            for doc in module_cursor:
+                doc.pop("_id", None)
+                if module_fields:
+                    filtered_module = {}
+                    for field in module_fields:
+                        if field in doc:
+                            filtered_module[field] = doc[field]
+                    modules.append(filtered_module)
+                else:
+                    modules.append(doc)
+
+        # 构建模块映射
+        module_map = {}
+        for module in modules:
+            module_id = module.get("bk_module_id")
+            module_map[module_id] = module
+
+        # 组装结果
+        relation = []
+        for host in hosts:
+            host_id = host.get("bk_host_id")
+            module_ids_for_host = host_module_map.get(host_id, [])
+            host_modules = []
+            for module_id in module_ids_for_host:
+                if module_id in module_map:
+                    host_modules.append(module_map[module_id])
+            relation.append({
+                "host": host,
+                "modules": host_modules
+            })
+
+        return make_response(data={
+            "count": total_count,
+            "relation": relation
+        })
     except Exception as e:
         import traceback
         traceback.print_exc()

@@ -43,15 +43,65 @@ def get_mock_config():
             }
         },
         "validation_rules": {
-            "singlechar": {
-                "value": "^[a-zA-Z0-9_\\-]+$",
+            "number": {
+                "value": "^(\\-|\\+)?\\d+$",
+                "description": "字段类型\"数字\"的验证规则",
                 "i18n": {
-                    "cn": "格式不正确，仅允许字母、数字、下划线和中划线",
-                    "en": "Format is incorrect, only letters, numbers, underscores and hyphens are allowed"
+                    "cn": "请输入正确的数字",
+                    "en": "Please enter the correct number"
+                }
+            },
+            "float": {
+                "value": "^[+-]?([0-9]*[.]?[0-9]+|[0-9]+[.]?[0-9]*)([eE][+-]?[0-9]+)?$",
+                "description": "字段类型\"浮点\"的验证规则",
+                "i18n": {
+                    "cn": "请输入正确的浮点数",
+                    "en": "Please enter the correct float data"
+                }
+            },
+            "singlechar": {
+                "value": "\\S*",
+                "description": "字段类型\"短字符\"的验证规则",
+                "i18n": {
+                    "cn": "请输入正确的短字符内容",
+                    "en": "Please enter the correct content"
+                }
+            },
+            "longchar": {
+                "value": "\\S*",
+                "description": "字段类型\"长字符\"的验证规则",
+                "i18n": {
+                    "cn": "请输入正确的长字符内容",
+                    "en": "Please enter the correct content"
+                }
+            },
+            "associationId": {
+                "value": "^[a-zA-Z][\\w]*$",
+                "description": "关联类型唯一标识验证规则",
+                "i18n": {
+                    "cn": "格式不正确，请填写英文开头，下划线，数字，英文的组合",
+                    "en": "The format is incorrect, can only contain underscores, numbers, letter and start with a letter"
+                }
+            },
+            "classifyId": {
+                "value": "^[a-zA-Z][\\w]*$",
+                "description": "模型分组唯一标识验证规则",
+                "i18n": {
+                    "cn": "请输入正确的内容",
+                    "en": "Please enter the correct content"
+                }
+            },
+            "modelId": {
+                "value": "^[a-zA-Z][\\w]*$",
+                "description": "模型唯一标识验证规则",
+                "i18n": {
+                    "cn": "格式不正确，请填写英文开头，下划线，数字，英文的组合",
+                    "en": "The format is incorrect, can only contain underscores, numbers, letter and start with a letter"
                 }
             },
             "namedCharacter": {
                 "value": "^[a-zA-Z0-9_\\-\\u4e00-\\u9fa5]+$",
+                "description": "命名字符验证规则",
                 "i18n": {
                     "cn": "只能包含数字、字母、下划线、横线和中文",
                     "en": "Can only contain numbers, letters, underscores, hyphens and Chinese characters"
@@ -555,8 +605,171 @@ def find_object():
 @admin_bp.route('/hosts/search', methods=['POST'])
 def hosts_search():
     try:
-        return make_response(data={"info": [], "count": 0})
+        from app.models.db import get_db_connection
+        conn = get_db_connection()
+        if conn is None:
+            return make_response(result=False, code=500, message="数据库连接失败")
+
+        # 获取请求数据
+        req_data = request.get_json() or {}
+        page = req_data.get('page', {})
+        start = page.get('start', 0)
+        limit = page.get('limit', 20)
+        sort = page.get('sort', 'bk_host_id')
+        conditions = req_data.get('condition', [])
+        
+        # 查询条件处理
+        query = {}
+        host_ids_filter = None
+        
+        # 如果有条件，处理条件
+        if conditions and len(conditions) > 0:
+            # 查找资源池业务条件
+            biz_condition = None
+            for cond in conditions:
+                if cond.get('bk_obj_id') == 'biz':
+                    biz_condition = cond
+                    break
+            
+            # 如果有资源池条件，并且是默认业务，查询所有主机
+            if biz_condition:
+                biz_filter = biz_condition.get('condition', [])
+                for f in biz_filter:
+                    if f.get('field') == 'default' and f.get('value') == 1:
+                        # 查询资源池下的所有主机
+                        host_relations = list(conn.cc_HostModuleRelation.find({"bk_biz_id": 1}))
+                        host_ids_filter = [r.get('bk_host_id') for r in host_relations]
+                        if host_ids_filter:
+                            query = {"bk_host_id": {"$in": host_ids_filter}}
+        
+        # 查询主机数据
+        collection = conn['cc_HostBase']
+        cursor = collection.find(query)
+        
+        # 排序
+        if sort:
+            sort_dir = 1
+            if sort.startswith('-'):
+                sort_dir = -1
+                sort = sort[1:]
+            cursor = cursor.sort(sort, sort_dir)
+        
+        # 总数
+        total_count = collection.count_documents(query)
+        
+        # 分页
+        cursor = cursor.skip(start).limit(limit)
+        
+        # 处理结果，构建符合前端期望的数据结构
+        result_info = []
+        host_id_list = []
+        
+        # 先收集主机ID
+        for doc in cursor:
+            host_id = doc.get('bk_host_id')
+            host_id_list.append(host_id)
+        
+        # 如果有主机，查询它们的主机-模块关系
+        if host_id_list:
+            # 查询主机-模块关系
+            host_relations = list(conn.cc_HostModuleRelation.find({
+                "bk_host_id": {"$in": host_id_list}
+            }))
+            
+            # 获取所有涉及的模块ID
+            module_ids = list(set([r.get('bk_module_id') for r in host_relations if r.get('bk_module_id')]))
+            
+            # 查询模块信息
+            module_map = {}
+            if module_ids:
+                module_docs = list(conn.cc_ModuleBase.find({"bk_module_id": {"$in": module_ids}}))
+                for m in module_docs:
+                    m.pop('_id', None)
+                    module_map[m.get('bk_module_id')] = m
+            
+            # 获取所有涉及的集群ID
+            set_ids = list(set([r.get('bk_set_id') for r in host_relations if r.get('bk_set_id')]))
+            
+            # 查询集群信息
+            set_map = {}
+            if set_ids:
+                set_docs = list(conn.cc_SetBase.find({"bk_set_id": {"$in": set_ids}}))
+                for s in set_docs:
+                    s.pop('_id', None)
+                    set_map[s.get('bk_set_id')] = s
+            
+            # 查询业务信息 - 根据实际的主机-模块关系获取业务ID
+            biz_ids = list(set([rel.get('bk_biz_id') for rel in host_relations if rel.get('bk_biz_id')]))
+            biz_map = {}
+            if biz_ids:
+                biz_docs = list(conn.cc_ApplicationBase.find({"bk_biz_id": {"$in": biz_ids}}))
+                for biz in biz_docs:
+                    biz.pop('_id', None)
+                    biz_map[biz.get('bk_biz_id')] = biz
+            
+            # 构建主机-模块-集群映射
+            host_module_map = {}
+            host_set_map = {}
+            host_biz_map = {}
+            
+            for rel in host_relations:
+                host_id = rel.get('bk_host_id')
+                set_id = rel.get('bk_set_id')
+                module_id = rel.get('bk_module_id')
+                
+                if host_id not in host_module_map:
+                    host_module_map[host_id] = []
+                if module_id not in host_module_map[host_id]:
+                    host_module_map[host_id].append(module_id)
+                
+                if host_id not in host_set_map:
+                    host_set_map[host_id] = []
+                if set_id not in host_set_map[host_id]:
+                    host_set_map[host_id].append(set_id)
+                
+                if host_id not in host_biz_map:
+                    host_biz_map[host_id] = rel.get('bk_biz_id')
+            
+            # 重新查询主机数据并构建返回结果
+            for doc in collection.find({"bk_host_id": {"$in": host_id_list}}):
+                doc.pop('_id', None)
+                host_id = doc.get('bk_host_id')
+                
+                # 获取该主机的模块、集群、业务信息
+                host_module_ids = host_module_map.get(host_id, [])
+                host_set_ids = host_set_map.get(host_id, [])
+                
+                # 构建返回对象
+                item = {}
+                item['host'] = doc
+                
+                # 添加模块信息
+                modules = []
+                for mid in host_module_ids:
+                    if mid in module_map:
+                        modules.append(module_map[mid].copy())
+                item['module'] = modules
+                
+                # 添加集群信息
+                sets = []
+                for sid in host_set_ids:
+                    if sid in set_map:
+                        sets.append(set_map[sid].copy())
+                item['set'] = sets
+                
+                # 添加业务信息
+                biz = []
+                host_biz_id = host_biz_map.get(host_id)
+                if host_biz_id and host_biz_id in biz_map:
+                    biz.append(biz_map[host_biz_id].copy())
+                item['biz'] = biz
+                
+                result_info.append(item)
+        
+        return make_response(data={"info": result_info, "count": total_count})
     except Exception as e:
+        import traceback
+        traceback.print_exc()
         return make_response(result=False, code=500, message=str(e))
 
 
@@ -564,8 +777,70 @@ def hosts_search():
 @admin_bp.route('/hosts/search/web', methods=['POST'])
 def hosts_search_web():
     try:
-        return make_response(data={"info": [], "count": 0})
+        from app.models.db import get_db_connection
+        conn = get_db_connection()
+        if conn is None:
+            return make_response(result=False, code=500, message="数据库连接失败")
+
+        # 获取请求数据
+        req_data = request.get_json() or {}
+        page = req_data.get('page', {})
+        start = page.get('start', 0)
+        limit = page.get('limit', 20)
+        sort = page.get('sort', 'bk_host_id')
+        conditions = req_data.get('condition', [])
+        
+        # 查询条件处理
+        query = {}
+        
+        # 如果有条件，处理条件
+        if conditions and len(conditions) > 0:
+            # 查找资源池业务条件
+            biz_condition = None
+            for cond in conditions:
+                if cond.get('bk_obj_id') == 'biz':
+                    biz_condition = cond
+                    break
+            
+            # 如果有资源池条件，并且是默认业务，查询所有主机
+            if biz_condition:
+                biz_filter = biz_condition.get('condition', [])
+                for f in biz_filter:
+                    if f.get('field') == 'default' and f.get('value') == 1:
+                        # 查询资源池下的所有主机
+                        host_relations = list(conn.cc_HostModuleRelation.find({"bk_biz_id": 1}))
+                        host_ids = [r.get('bk_host_id') for r in host_relations]
+                        if host_ids:
+                            query = {"bk_host_id": {"$in": host_ids}}
+        
+        # 查询主机数据
+        collection = conn['cc_HostBase']
+        cursor = collection.find(query)
+        
+        # 排序
+        if sort:
+            sort_dir = 1
+            if sort.startswith('-'):
+                sort_dir = -1
+                sort = sort[1:]
+            cursor = cursor.sort(sort, sort_dir)
+        
+        # 总数
+        total_count = collection.count_documents(query)
+        
+        # 分页
+        cursor = cursor.skip(start).limit(limit)
+        
+        # 处理结果
+        hosts = []
+        for doc in cursor:
+            doc.pop('_id', None)
+            hosts.append(doc)
+        
+        return make_response(data={"info": hosts, "count": total_count})
     except Exception as e:
+        import traceback
+        traceback.print_exc()
         return make_response(result=False, code=500, message=str(e))
 
 
