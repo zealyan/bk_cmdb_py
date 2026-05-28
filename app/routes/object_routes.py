@@ -1,8 +1,11 @@
 from datetime import datetime
-from flask import Blueprint, jsonify, request
+from flask import Blueprint, jsonify, request, g
 from app.models.db import db, get_db_connection, get_mongo_collection
 
 object_bp = Blueprint('object', __name__)
+
+# 原项目权限错误码
+PERMISSION_DENIED_CODE = 9900403
 
 
 def make_response(result=True, code=0, message="success", data=None, **kwargs):
@@ -16,6 +19,50 @@ def make_response(result=True, code=0, message="success", data=None, **kwargs):
     # 添加额外的字段到响应顶层
     response.update(kwargs)
     return jsonify(response)
+
+
+def check_user_biz_permission(username, biz_id):
+    """检查用户是否有权限访问特定业务
+    
+    Args:
+        username: 用户名
+        biz_id: 业务ID
+        
+    Returns:
+        bool: 有权限返回True，否则返回False
+    """
+    conn = get_db_connection()
+    if conn is None:
+        return False
+    
+    # 检查用户是否有该业务的访问权限
+    user_biz = conn.user_business.find_one({
+        'username': username,
+        'bk_biz_id': biz_id
+    })
+    
+    return user_biz is not None
+
+
+def get_user_accessible_biz_ids(username):
+    """获取用户可访问的所有业务ID列表
+    
+    Args:
+        username: 用户名
+        
+    Returns:
+        list: 业务ID列表
+    """
+    conn = get_db_connection()
+    if conn is None:
+        return []
+    
+    user_biz_list = list(conn.user_business.find(
+        {'username': username},
+        {'bk_biz_id': 1, '_id': 0}
+    ))
+    
+    return [ub['bk_biz_id'] for ub in user_biz_list]
 
 
 @object_bp.route('/api/v3/find/objectclassification', methods=['POST'])
@@ -736,11 +783,31 @@ def find_topo_inst_with_statistics(bk_biz_id):
         if conn is None:
             return make_response(result=False, code=500, message="数据库连接失败")
 
+        # 获取当前用户
+        current_username = getattr(g, 'current_user', None)
+        
+        # 检查用户权限（如果能获取到用户名，必须检查权限）
+        accessible_biz_ids = []
+        if current_username:
+            accessible_biz_ids = get_user_accessible_biz_ids(current_username)
+        
+        # 如果有用户名但没有可访问的业务，或者请求的业务不在可访问列表中，返回空结果
+        if current_username and bk_biz_id not in accessible_biz_ids:
+            return make_response(data=[])
+
         # 查询业务数据
         business = conn.cc_ApplicationBase.find_one({"bk_biz_id": bk_biz_id})
         if not business:
-            # 如果没有找到指定业务，返回第一个启用的业务
-            business = conn.cc_ApplicationBase.find_one({"bk_data_status": {"$ne": "disabled"}})
+            # 如果没有找到指定业务，且用户有可访问的业务，返回第一个用户有权限的业务
+            if current_username and accessible_biz_ids:
+                for biz_id in accessible_biz_ids:
+                    business = conn.cc_ApplicationBase.find_one({"bk_biz_id": biz_id})
+                    if business:
+                        bk_biz_id = biz_id
+                        break
+            else:
+                # 如果没有任何用户信息，返回空结构
+                return make_response(data=[])
         
         if not business:
             # 如果没有任何业务，返回空结构
@@ -948,11 +1015,26 @@ def find_business_topo_inst(bk_biz_id):
         if conn is None:
             return make_response(result=False, code=500, message="数据库连接失败")
 
+        # 获取当前用户
+        current_username = getattr(g, 'current_user', None)
+        
+        # 检查用户权限
+        accessible_biz_ids = []
+        if current_username:
+            accessible_biz_ids = get_user_accessible_biz_ids(current_username)
+            if bk_biz_id not in accessible_biz_ids:
+                return make_response(result=False, code=PERMISSION_DENIED_CODE, message="暂无该业务权限或业务不存在")
+
         # 查询业务信息
         business = conn.cc_ApplicationBase.find_one({"bk_biz_id": bk_biz_id})
         if not business:
-            # 如果没有找到指定业务，返回第一个启用的业务
-            business = conn.cc_ApplicationBase.find_one({"bk_data_status": {"$ne": "disabled"}})
+            # 如果没有找到指定业务，返回第一个用户有权限的业务
+            if current_username and accessible_biz_ids:
+                for biz_id in accessible_biz_ids:
+                    business = conn.cc_ApplicationBase.find_one({"bk_biz_id": biz_id})
+                    if business:
+                        bk_biz_id = biz_id
+                        break
         
         if not business:
             return make_response(result=False, code=404, message="业务不存在")

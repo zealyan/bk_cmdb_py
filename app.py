@@ -21,7 +21,20 @@ CORS(app, supports_credentials=True, resources={
     r"/*": {
         "origins": "*",
         "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-        "allow_headers": ["Content-Type", "Authorization", "X-Requested-With", "X-CSRFToken"]
+        "allow_headers": [
+            "Content-Type", 
+            "Authorization", 
+            "X-Requested-With", 
+            "X-CSRFToken",
+            "BK_User",
+            "HTTP_BLUEKING_SUPPLIER_ID",
+            "Cc_Request_Id",
+            "traceparent"
+        ],
+        "expose_headers": [
+            "Content-Type",
+            "Authorization"
+        ]
     }
 })
 

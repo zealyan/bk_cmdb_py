@@ -24,7 +24,12 @@ def make_response(result=True, code=0, message="success", data=None, **kwargs):
 def require_auth(f):
     """登录验证装饰器
     
-    检查请求中的 Token 是否有效，用于保护需要登录才能访问的接口。
+    检查请求中的 Token 或 HTTP 头用户信息是否有效，用于保护需要登录才能访问的接口。
+    支持以下认证方式（按优先级）：
+    1. HTTP 头中的 BK_User (原项目标准)
+    2. Cookie 中的 bk_token
+    3. Authorization Bearer Token
+    
     当 SKIP_LOGIN 配置启用时，自动使用管理员账户。
     
     Args:
@@ -38,6 +43,44 @@ def require_auth(f):
     """
     @wraps(f)
     def wrapper(*args, **kwargs):
+        # 优先从 HTTP 头获取用户信息（原项目标准方式）
+        # 原项目使用 BK_User 头传递用户名
+        bk_user = None
+        for header_name in ['BK_User', 'Bk_User', 'bk_user']:
+            bk_user = request.headers.get(header_name)
+            if bk_user:
+                break
+        
+        # 获取供应商账号（原项目使用 HTTP_BLUEKING_SUPPLIER_ID）
+        supplier_account = None
+        for header_name in ['HTTP_BLUEKING_SUPPLIER_ID', 'Blueking_Supplier_Id', 'supplier_id']:
+            supplier_account = request.headers.get(header_name)
+            if supplier_account:
+                break
+        
+        # 如果 HTTP 头中有用户信息，使用它
+        if bk_user:
+            conn = get_db_connection()
+            if conn:
+                user = conn.users.find_one({"username": bk_user})
+                if user:
+                    g.current_user = bk_user
+                    g.user_info = {
+                        'display_name': user.get('display_name', bk_user),
+                        'role': user.get('role', 'user')
+                    }
+                    g.supplier_account = supplier_account or '0'
+                    return f(*args, **kwargs)
+                else:
+                    # 如果用户不存在，但HTTP头中有用户信息，仍然允许访问（兼容跳过登录模式）
+                    g.current_user = bk_user
+                    g.user_info = {
+                        'display_name': bk_user,
+                        'role': 'admin'
+                    }
+                    g.supplier_account = supplier_account or '0'
+                    return f(*args, **kwargs)
+        
         # Skip Login 模式：自动使用配置的用户
         if Config.SKIP_LOGIN:
             g.current_user = Config.SKIP_LOGIN_USER
@@ -45,14 +88,17 @@ def require_auth(f):
                 'display_name': 'Administrator',
                 'role': 'admin'
             }
+            g.supplier_account = '0'
             return f(*args, **kwargs)
         
+        # 尝试从 Cookie 获取 Token
         token = request.cookies.get('bk_token')
         
         if not token:
-            token = request.headers.get('Authorization')
-            if token and token.startswith('Bearer '):
-                token = token[7:]
+            # 尝试从 Authorization Header 获取 Bearer Token
+            auth_header = request.headers.get('Authorization')
+            if auth_header and auth_header.startswith('Bearer '):
+                token = auth_header[7:]
         
         if not token:
             return make_response(
@@ -71,6 +117,7 @@ def require_auth(f):
         
         g.current_user = session_data['username']
         g.user_info = session_data.get('user_info', {})
+        g.supplier_account = supplier_account or '0'
         
         return f(*args, **kwargs)
     
