@@ -53,32 +53,10 @@ const dev = {
   // Paths
   assetsSubDirectory: '',
   assetsPublicPath: '/static/',
-  // AI: 创建通用的代理事件处理函数，用于处理 OPTIONS 请求
-  // AI: 示例: 当浏览器发送跨域POST请求前，会先发送 OPTIONS 预检请求
-  onProxyRes(proxyRes, req, res) {
-    // AI: 为所有代理响应添加 CORS 响应头
-    res.setHeader('Access-Control-Allow-Origin', req.headers.origin || '*')
-    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS')
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, BK_User, HTTP_BLUEKING_SUPPLIER_ID, Cc_Request_Id')
-    res.setHeader('Access-Control-Allow-Credentials', 'true')
-  },
-  onProxyReq(proxyReq, req, res) {
-    // AI: 如果是 OPTIONS 请求，直接返回 200 而不转发到后端
-    if (req.method === 'OPTIONS') {
-      res.setHeader('Access-Control-Allow-Origin', req.headers.origin || '*')
-      res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS')
-      res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, BK_User, HTTP_BLUEKING_SUPPLIER_ID, Cc_Request_Id')
-      res.setHeader('Access-Control-Allow-Credentials', 'true')
-      res.writeHead(200)
-      res.end()
-      // AI: 中止原始请求，不再转发到后端
-      proxyReq.abort()
-    }
-  },
 
   proxyTable: {
     '/proxy': {
-      logLevel: 'info',
+      logLevel: 'debug',
       changeOrigin: true,
       target: 'http://localhost:3000/',
       pathRewrite: {
