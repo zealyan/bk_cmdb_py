@@ -188,7 +188,7 @@ DEFAULT_BIZ_SETS = [
 @admin_bp.route('/findmany/biz_set/with_reduced', methods=['GET', 'POST'])
 def biz_set_reduced():
     try:
-        return make_response(info=DEFAULT_BIZ_SETS)
+        return make_response(data=DEFAULT_BIZ_SETS)
     except Exception as e:
         return make_response(result=False, code=500, message=str(e))
 
@@ -203,7 +203,7 @@ def biz_set_simplify():
             }
             for bs in DEFAULT_BIZ_SETS
         ]
-        return make_response(info=simplified_list)
+        return make_response(data=simplified_list)
     except Exception as e:
         return make_response(result=False, code=500, message=str(e))
 
