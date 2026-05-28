@@ -17,8 +17,8 @@ app.config.from_object(Config)
 
 Session(app)
 
-# 使用最简单的 CORS 配置，允许所有
-CORS(app)
+# 配置 CORS，支持 withCredentials
+CORS(app, supports_credentials=True, origins=['http://localhost:8080', 'http://127.0.0.1:8080'])
 
 # 同时注册两个版本的路由：带 /api/v3 前缀和不带前缀
 app.register_blueprint(user_bp)
@@ -45,25 +45,7 @@ def init_data():
 
 
 
-@app.before_request
-def before_request():
-    if request.method == 'OPTIONS':
-        response = app.make_default_options_response()
-        origin = request.headers.get('Origin', '*')
-        response.headers['Access-Control-Allow-Origin'] = origin
-        response.headers['Access-Control-Allow-Methods'] = 'GET, POST, PUT, DELETE, OPTIONS'
-        response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization, X-Requested-With, X-CSRFToken, BK_User, HTTP_BLUEKING_SUPPLIER_ID, Cc_Request_Id, traceparent'
-        response.headers['Access-Control-Allow-Credentials'] = 'true'
-        response.headers['Access-Control-Max-Age'] = '3600'
-        return response
 
-
-@app.after_request
-def after_request(response):
-    origin = request.headers.get('Origin', '*')
-    response.headers['Access-Control-Allow-Origin'] = origin
-    response.headers['Access-Control-Allow-Credentials'] = 'true'
-    return response
 
 
 @app.route('/')
