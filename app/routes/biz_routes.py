@@ -65,6 +65,7 @@ def build_query_conditions(condition):
 
 
 @biz_bp.route('/biz/search/<account>', methods=['POST'])
+@require_auth
 def biz_search(account):
     """按条件搜索业务"""
     try:
@@ -98,6 +99,35 @@ def biz_search(account):
         if 'bk_data_status' not in query:
             query['bk_data_status'] = {'$ne': 'disabled'}
         
+        # 获取当前用户
+        current_username = getattr(g, 'current_user', None)
+        
+        # 如果有当前用户，只返回用户有权限的业务
+        if current_username:
+            user_biz_list = list(conn.user_business.find(
+                {'username': current_username},
+                {'bk_biz_id': 1, '_id': 0}
+            ))
+            user_biz_ids = [ub['bk_biz_id'] for ub in user_biz_list]
+            
+            # 添加用户权限过滤
+            if user_biz_ids:
+                if 'bk_biz_id' in query:
+                    # 如果已有 bk_biz_id 条件，取交集
+                    if isinstance(query['bk_biz_id'], dict):
+                        if '$in' in query['bk_biz_id']:
+                            query['bk_biz_id']['$in'] = [biz_id for biz_id in query['bk_biz_id']['$in'] if biz_id in user_biz_ids]
+                        else:
+                            query['bk_biz_id'] = {'$in': user_biz_ids}
+                    else:
+                        # 如果是单个值
+                        if query['bk_biz_id'] in user_biz_ids:
+                            pass  # 保持原样
+                        else:
+                            query['bk_biz_id'] = {'$in': []}  # 没有权限
+                else:
+                    query['bk_biz_id'] = {'$in': user_biz_ids}
+        
         # 查询数据
         cursor = conn.cc_ApplicationBase.find(query)
         
@@ -117,13 +147,14 @@ def biz_search(account):
         for biz in businesses:
             biz.pop('_id', None)
         
-        return make_response(data={"count": total_count, "info": businesses})
+        return make_response(info=businesses, count=total_count)
     except Exception as e:
         print(f"搜索业务失败: {e}")
         return make_response(result=False, code=500, message=str(e))
 
 
 @biz_bp.route('/biz/search/web', methods=['POST'])
+@require_auth
 def biz_search_web():
     """Web端搜索业务（与search接口相同，为了兼容性）"""
     return biz_search('0')
