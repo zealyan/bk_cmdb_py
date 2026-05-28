@@ -8,13 +8,17 @@ from app.config import Config
 user_bp = Blueprint('user', __name__)
 
 
-def make_response(result=True, code=0, message="success", data=None):
-    return jsonify({
+def make_response(result=True, code=0, message="success", data=None, **kwargs):
+    response = {
         "result": result,
         "code": code,
-        "message": message,
-        "data": data
-    })
+        "message": message
+    }
+    if data is not None:
+        response["data"] = data
+    # 添加额外的字段到响应顶层
+    response.update(kwargs)
+    return jsonify(response)
 
 
 def require_auth(f):

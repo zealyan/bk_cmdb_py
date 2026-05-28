@@ -5,13 +5,17 @@ from app.models.db import db, get_db_connection, get_mongo_collection
 object_bp = Blueprint('object', __name__)
 
 
-def make_response(result=True, code=0, message="success", data=None):
-    return jsonify({
+def make_response(result=True, code=0, message="success", data=None, **kwargs):
+    response = {
         "result": result,
         "code": code,
-        "message": message,
-        "data": data
-    })
+        "message": message
+    }
+    if data is not None:
+        response["data"] = data
+    # 添加额外的字段到响应顶层
+    response.update(kwargs)
+    return jsonify(response)
 
 
 @object_bp.route('/api/v3/find/objectclassification', methods=['POST'])

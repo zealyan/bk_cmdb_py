@@ -6,13 +6,17 @@ import time
 biz_bp = Blueprint('biz', __name__)
 
 
-def make_response(result=True, code=0, message="success", data=None):
-    return jsonify({
+def make_response(result=True, code=0, message="success", data=None, **kwargs):
+    response = {
         "result": result,
         "code": code,
-        "message": message,
-        "data": data
-    })
+        "message": message
+    }
+    if data is not None:
+        response["data"] = data
+    # 添加额外的字段到响应顶层
+    response.update(kwargs)
+    return jsonify(response)
 
 
 def get_current_time():
@@ -174,7 +178,7 @@ def biz_with_reduced():
                 {'_id': 0}
             ).sort('bk_biz_id', 1))
         
-        return make_response(data=businesses)
+        return make_response(info=businesses)
     except Exception as e:
         print(f"获取带权限信息的业务列表失败: {e}")
         return make_response(result=False, code=500, message=str(e))
