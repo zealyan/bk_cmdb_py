@@ -136,7 +136,7 @@ def biz_simplify():
             {'bk_data_status': {'$ne': 'disabled'}},
             {'bk_biz_id': 1, 'bk_biz_name': 1, '_id': 0}
         ).sort('bk_biz_id', 1))
-        return make_response(data={"info": businesses})
+        return make_response(data=businesses)
     except Exception as e:
         print(f"获取简化业务列表失败: {e}")
         return make_response(result=False, code=500, message=str(e))

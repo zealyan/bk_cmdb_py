@@ -20,7 +20,7 @@ def find_object_classification():
     try:
         collection = get_mongo_collection('cc_ObjClassification')
         classifications = list(collection.find({}, {'_id': 0}))
-        return make_response(data={"info": classifications})
+        return make_response(data=classifications)
     except Exception as e:
         return make_response(result=False, code=500, message=str(e))
 
@@ -68,7 +68,7 @@ def find_object_association():
                 "is_pre": True
             }
         ]
-        return make_response(data={"info": associations})
+        return make_response(data=associations)
     except Exception as e:
         import traceback
         traceback.print_exc()
@@ -85,7 +85,7 @@ def find_object_att_group():
             return make_response(result=False, code=500, message="数据库连接失败")
         
         groups = list(conn.cc_ObjAttGroup.find({}, {'_id': 0}))
-        return make_response(data={"info": groups})
+        return make_response(data=groups)
     except Exception as e:
         return make_response(result=False, code=500, message=str(e))
 
@@ -320,7 +320,7 @@ def find_classification_object():
                 class_map[cls_id]["bk_objects"].append(obj)
         
         class_data = list(class_map.values())
-        return make_response(data={"info": class_data})
+        return make_response(data=class_data)
     except Exception as e:
         import traceback
         traceback.print_exc()
