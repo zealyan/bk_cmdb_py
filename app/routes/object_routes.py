@@ -391,6 +391,34 @@ def find_topo_path(biz_id):
         return make_response(result=False, code=500, message=str(e))
 
 
+@object_bp.route('/api/v3/find/biz_set/topo_path', methods=['POST'])
+@object_bp.route('/find/biz_set/topo_path', methods=['POST'])
+def find_biz_set_topo_path():
+    """获取业务集拓扑路径"""
+    try:
+        req_data = request.get_json() or {}
+        bk_biz_set_id = req_data.get('bk_biz_set_id')
+        bk_parent_obj_id = req_data.get('bk_parent_obj_id')
+        bk_parent_id = req_data.get('bk_parent_id')
+        
+        # 构建拓扑路径
+        path = []
+        
+        # 添加业务集节点
+        path.append({
+            "bk_obj_id": "bk_biz_set_obj",
+            "bk_obj_name": "业务集",
+            "bk_inst_id": bk_biz_set_id,
+            "bk_inst_name": f"业务集_{bk_biz_set_id}"
+        })
+        
+        return make_response(data=path)
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return make_response(result=False, code=500, message=str(e))
+
+
 @object_bp.route('/api/v3/topo/internal/<supplier_account>/<int:bk_biz_id>/with_statistics', methods=['GET'])
 @object_bp.route('/topo/internal/<supplier_account>/<int:bk_biz_id>/with_statistics', methods=['GET'])
 def topo_internal_with_statistics_new(supplier_account, bk_biz_id):
