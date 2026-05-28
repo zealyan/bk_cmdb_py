@@ -1,3 +1,7 @@
+import logging
+logging.basicConfig(level=logging.DEBUG, format='%(asctime)s [%(levelname)s] %(message)s')
+logger = logging.getLogger(__name__)
+
 from flask import Blueprint, request, jsonify, session as flask_session, g
 from functools import wraps
 from app.models.db import db, get_db_connection, INIT_DATA, init_mock_data
@@ -43,22 +47,26 @@ def require_auth(f):
     """
     @wraps(f)
     def wrapper(*args, **kwargs):
-        # 优先从 HTTP 头获取用户信息（原项目标准方式）
-        # 原项目使用 BK_User 头传递用户名
         bk_user = None
-        for header_name in ['BK_User', 'Bk_User', 'bk_user']:
-            bk_user = request.headers.get(header_name)
-            if bk_user:
-                break
-        
-        # 获取供应商账号（原项目使用 HTTP_BLUEKING_SUPPLIER_ID）
         supplier_account = None
-        for header_name in ['HTTP_BLUEKING_SUPPLIER_ID', 'Blueking_Supplier_Id', 'supplier_id']:
-            supplier_account = request.headers.get(header_name)
-            if supplier_account:
-                break
         
-        # 如果 HTTP 头中有用户信息，使用它
+        headers_dict = dict(request.headers)
+        headers_lower = {k.lower().replace('-', '_'): v for k, v in request.headers}
+        
+        logger.debug(f"All headers: {headers_dict}")
+        logger.debug(f"Headers lower: {headers_lower}")
+        
+        if 'bk_user' in headers_lower:
+            bk_user = headers_lower['bk_user']
+            logger.debug(f"Found BK_User: {bk_user}")
+        
+        if 'http_blueking_supplier_id' in headers_lower:
+            supplier_account = headers_lower['http_blueking_supplier_id']
+        elif 'blueking_supplier_id' in headers_lower:
+            supplier_account = headers_lower['blueking_supplier_id']
+        
+        logger.debug(f"bk_user={bk_user}, supplier_account={supplier_account}, SKIP_LOGIN={Config.SKIP_LOGIN}")
+        
         if bk_user:
             conn = get_db_connection()
             if conn:
@@ -72,7 +80,6 @@ def require_auth(f):
                     g.supplier_account = supplier_account or '0'
                     return f(*args, **kwargs)
                 else:
-                    # 如果用户不存在，但HTTP头中有用户信息，仍然允许访问（兼容跳过登录模式）
                     g.current_user = bk_user
                     g.user_info = {
                         'display_name': bk_user,
@@ -81,7 +88,6 @@ def require_auth(f):
                     g.supplier_account = supplier_account or '0'
                     return f(*args, **kwargs)
         
-        # Skip Login 模式：自动使用配置的用户
         if Config.SKIP_LOGIN:
             g.current_user = Config.SKIP_LOGIN_USER
             g.user_info = {
@@ -91,16 +97,15 @@ def require_auth(f):
             g.supplier_account = '0'
             return f(*args, **kwargs)
         
-        # 尝试从 Cookie 获取 Token
         token = request.cookies.get('bk_token')
         
         if not token:
-            # 尝试从 Authorization Header 获取 Bearer Token
             auth_header = request.headers.get('Authorization')
             if auth_header and auth_header.startswith('Bearer '):
                 token = auth_header[7:]
         
         if not token:
+            print(f"[Auth Debug] No auth found. BK_User={bk_user}, Token={token}, Headers={dict(request.headers)}")
             return make_response(
                 result=False,
                 code=401,

@@ -160,19 +160,36 @@ def biz_search_web():
     return biz_search('0')
 
 
+@biz_bp.route('/test/headers', methods=['GET'])
+def test_headers():
+    """测试请求头"""
+    all_headers = dict(request.headers)
+    return jsonify({
+        "result": True,
+        "code": 0,
+        "message": "success",
+        "data": {
+            "all_headers": all_headers,
+            "BK_User": request.headers.get('BK_User'),
+            "HTTP_BK_USER": request.headers.get('HTTP_BK_USER'),
+        }
+    })
+
+
 @biz_bp.route('/biz/simplify', methods=['GET'])
 @require_auth
 def biz_simplify():
     """获取简化的业务列表"""
+    import sys
+    print(f"[BizSimplify Debug] In biz_simplify, g.current_user={getattr(sys.modules['flask'], 'g', None) if 'flask' in sys.modules else 'N/A'}", file=sys.stdout)
+    sys.stdout.flush()
     try:
         conn = get_db_connection()
         if conn is None:
             return make_response(result=False, code=500, message="数据库连接失败")
         
-        # 获取当前用户
         current_username = getattr(g, 'current_user', None)
         
-        # 如果有当前用户，只返回用户有权限的业务
         if current_username:
             user_biz_list = list(conn.user_business.find(
                 {'username': current_username},
@@ -185,13 +202,12 @@ def biz_simplify():
                 {'bk_biz_id': 1, 'bk_biz_name': 1, '_id': 0}
             ).sort('bk_biz_id', 1))
         else:
-            # 没有用户信息，返回所有业务
             businesses = list(conn.cc_ApplicationBase.find(
                 {'bk_data_status': {'$ne': 'disabled'}},
                 {'bk_biz_id': 1, 'bk_biz_name': 1, '_id': 0}
             ).sort('bk_biz_id', 1))
         
-        return make_response(data=businesses, info=businesses)
+        return make_response(data={'count': len(businesses), 'info': businesses}, info=businesses)
     except Exception as e:
         print(f"获取简化业务列表失败: {e}")
         return make_response(result=False, code=500, message=str(e))
