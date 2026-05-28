@@ -1365,3 +1365,59 @@ def find_module_host_relation(bk_biz_id):
         import traceback
         traceback.print_exc()
         return make_response(result=False, code=500, message=str(e))
+
+
+@object_bp.route('/api/v3/usercustom/user/search', methods=['POST'])
+@object_bp.route('/usercustom/user/search', methods=['POST'])
+def usercustom_user_search():
+    """用户自定义搜索用户"""
+    try:
+        conn = get_db_connection()
+        if conn is None:
+            return make_response(result=False, code=500, message="数据库连接失败")
+        
+        # 获取请求数据
+        req_data = {}
+        if request.is_json:
+            req_data = request.get_json() or {}
+        elif request.form:
+            req_data = request.form.to_dict()
+        elif request.data:
+            try:
+                import json
+                req_data = json.loads(request.data)
+            except:
+                req_data = {}
+        
+        # 查询用户
+        users = list(conn.users.find({}, {'_id': 0}))
+        
+        return make_response(data={"count": len(users), "info": users})
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return make_response(result=False, code=500, message=str(e))
+
+
+@object_bp.route('/api/v3/usercustom/default/model', methods=['POST'])
+@object_bp.route('/usercustom/default/model', methods=['POST'])
+def usercustom_default_model():
+    """用户自定义默认模型"""
+    try:
+        return make_response(data={})
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return make_response(result=False, code=500, message=str(e))
+
+
+@object_bp.route('/api/v3/find/topoinst/biz_set/<int:biz_set_id>', methods=['POST'])
+@object_bp.route('/find/topoinst/biz_set/<int:biz_set_id>', methods=['POST'])
+def find_biz_set_topo_inst(biz_set_id):
+    """获取业务集拓扑实例"""
+    try:
+        return make_response(data=[])
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return make_response(result=False, code=500, message=str(e))
