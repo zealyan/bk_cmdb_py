@@ -174,6 +174,17 @@ def find_object_attr():
         all_attributes = []
         seen_prop_ids = set()  # 用于去重，避免重复的 bk_property_id
         
+        # 前端会自动添加的 ID 属性，避免重复
+        auto_add_id_props = {
+            'biz': 'bk_biz_id',
+            'host': 'bk_host_id',
+            'set': 'bk_set_id',
+            'module': 'bk_module_id',
+            'process': 'bk_process_id',
+            'plat': 'bk_cloud_id',
+            'biz_set': 'bk_biz_set_id'
+        }
+        
         if obj_ids:
             collection = get_mongo_collection('cc_ObjAttDes')
             docs = collection.find({"bk_obj_id": {"$in": obj_ids}})
@@ -214,7 +225,15 @@ def find_object_attr():
                 
                 # 去重：只添加没有见过的 bk_property_id
                 prop_id = attr.get("bk_property_id")
+                obj_type = attr.get("bk_obj_id")
+                
+                # 避免返回前端会自动添加的 ID 属性
                 if prop_id and prop_id not in seen_prop_ids:
+                    # 检查是否是会被前端自动添加的 ID 属性
+                    auto_prop = auto_add_id_props.get(obj_type)
+                    if auto_prop and prop_id == auto_prop:
+                        # 跳过这个属性，因为前端会自动添加
+                        continue
                     all_attributes.append(attr)
                     seen_prop_ids.add(prop_id)
         
