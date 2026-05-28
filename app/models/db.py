@@ -3316,6 +3316,13 @@ def init_mock_data():
                     {"$set": doc}, 
                     upsert=True
                 )
+            elif collection == "user_business":
+                # 特殊处理user_business，用username和bk_biz_id组合查询
+                conn[collection].update_one(
+                    {"username": doc["username"], "bk_biz_id": doc["bk_biz_id"]},
+                    {"$set": doc}, 
+                    upsert=True
+                )
             elif "bk_module_id" in doc:
                 conn[collection].update_one({"bk_module_id": doc["bk_module_id"]}, {"$set": doc}, upsert=True)
             elif "bk_set_id" in doc:

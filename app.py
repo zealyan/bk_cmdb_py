@@ -1,4 +1,4 @@
-from flask import Flask, jsonify
+from flask import Flask, jsonify, request
 from flask_cors import CORS
 from flask_session import Session
 from app.config import Config
@@ -17,26 +17,8 @@ app.config.from_object(Config)
 
 Session(app)
 
-CORS(app, supports_credentials=True, resources={
-    r"/*": {
-        "origins": "*",
-        "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-        "allow_headers": [
-            "Content-Type", 
-            "Authorization", 
-            "X-Requested-With", 
-            "X-CSRFToken",
-            "BK_User",
-            "HTTP_BLUEKING_SUPPLIER_ID",
-            "Cc_Request_Id",
-            "traceparent"
-        ],
-        "expose_headers": [
-            "Content-Type",
-            "Authorization"
-        ]
-    }
-})
+# 使用最简单的 CORS 配置，允许所有
+CORS(app)
 
 # 同时注册两个版本的路由：带 /api/v3 前缀和不带前缀
 app.register_blueprint(user_bp)
@@ -60,6 +42,7 @@ def init_data():
     # 初始化权限策略
     init_admin_super_permission()
     init_default_policies()
+
 
 
 @app.route('/')

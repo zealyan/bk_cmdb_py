@@ -198,6 +198,7 @@ def biz_simplify():
 
 
 @biz_bp.route('/biz/with_reduced', methods=['GET'])
+@biz_bp.route('/findmany/biz/with_reduced', methods=['GET'])
 @require_auth
 def biz_with_reduced():
     """获取带权限信息的业务列表"""
@@ -466,4 +467,27 @@ def get_business_by_id(biz_id):
         return make_response(data=business)
     except Exception as e:
         print(f"获取业务详情失败: {e}")
+        return make_response(result=False, code=500, message=str(e))
+
+
+@biz_bp.route('/biz_set/with_reduced', methods=['GET'])
+@biz_bp.route('/findmany/biz_set/with_reduced', methods=['GET'])
+@require_auth
+def biz_set_with_reduced():
+    """获取带权限信息的业务集列表"""
+    try:
+        conn = get_db_connection()
+
+        if conn is None:
+            return make_response(result=False, code=500, message="数据库连接失败")
+        
+        # 查询业务集数据
+        biz_sets = list(conn.cc_BizSet.find(
+            {'bk_data_status': {'$ne': 'disabled'}},
+            {'_id': 0}
+        ).sort('bk_biz_set_id', 1))
+        
+        return make_response(data=biz_sets, info=biz_sets)
+    except Exception as e:
+        print(f"获取业务集列表失败: {e}")
         return make_response(result=False, code=500, message=str(e))
