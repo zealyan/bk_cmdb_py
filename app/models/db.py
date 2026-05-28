@@ -3122,6 +3122,11 @@ INIT_DATA = {
         {"username": "jelly", "password": hash_password("jelly123"), "display_name": "Jelly", "qq": "", "phone": "", "email": ""}
     ],
     "user_business": [
+        {"username": "admin", "bk_biz_id": 1},
+        {"username": "admin", "bk_biz_id": 2},
+        {"username": "admin", "bk_biz_id": 3},
+        {"username": "admin", "bk_biz_id": 4},
+        {"username": "admin", "bk_biz_id": 5},
         {"username": "tom", "bk_biz_id": 2},
         {"username": "tom", "bk_biz_id": 3},
         {"username": "tom", "bk_biz_id": 4},
