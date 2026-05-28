@@ -186,11 +186,24 @@ DEFAULT_BIZ_SETS = [
 
 @admin_bp.route('/api/v3/findmany/biz_set/with_reduced', methods=['GET', 'POST'])
 @admin_bp.route('/findmany/biz_set/with_reduced', methods=['GET', 'POST'])
-@admin_bp.route('/api/v3/findmany/biz_set/simplify', methods=['GET', 'POST'])
-@admin_bp.route('/findmany/biz_set/simplify', methods=['GET', 'POST'])
 def biz_set_reduced():
     try:
         return make_response(info=DEFAULT_BIZ_SETS)
+    except Exception as e:
+        return make_response(result=False, code=500, message=str(e))
+
+@admin_bp.route('/api/v3/findmany/biz_set/simplify', methods=['GET', 'POST'])
+@admin_bp.route('/findmany/biz_set/simplify', methods=['GET', 'POST'])
+def biz_set_simplify():
+    try:
+        simplified_list = [
+            {
+                "bk_biz_set_id": bs.get("bk_biz_set_id"),
+                "bk_biz_set_name": bs.get("bk_biz_set_name")
+            }
+            for bs in DEFAULT_BIZ_SETS
+        ]
+        return make_response(info=simplified_list)
     except Exception as e:
         return make_response(result=False, code=500, message=str(e))
 
