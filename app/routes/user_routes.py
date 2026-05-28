@@ -608,6 +608,118 @@ def usermanage_list_users():
         return jsonify(error_response)
 
 
+@user_bp.route('/admin/find/system_config/platform_setting/current', methods=['GET'])
+@user_bp.route('/api/v3/admin/find/system_config/platform_setting/current', methods=['GET'])
+@require_auth
+def get_current_config():
+    """获取当前用户的全局设置"""
+    # 导入 Base64 编码
+    import base64
+    
+    # 默认全局配置，包含验证规则（按照前端期望的格式）
+    config = {
+        "backend": {
+            "max_biz_topo_level": 0,
+            "snapshot_biz_name": "蓝鲸"
+        },
+        "site": {
+            "name": {
+                "i18n": {
+                    "cn": "蓝鲸配置平台",
+                    "en": "BlueKing Configuration Platform"
+                }
+            },
+            "separator": "|"
+        },
+        "footer": {
+            "contact": {
+                "i18n": {
+                    "cn": "",
+                    "en": ""
+                }
+            },
+            "copyright": {
+                "i18n": {
+                    "cn": "",
+                    "en": ""
+                }
+            }
+        },
+        "validation_rules": {
+            "businessTopoInstNames": {
+                "value": base64.b64encode(b"^[^|/:*,<>\"?# ]*$").decode('utf-8'),
+                "i18n": {
+                    "cn": "格式不正确，不能包含特殊字符 | / : * , < > \" ? #及空格",
+                    "en": "Invalid format, cannot contain special characters | / : * , < > \" ? # or spaces"
+                }
+            }
+        },
+        "set": "空闲机池",
+        "idle_pool": {
+            "idle": "空闲机",
+            "fault": "故障机",
+            "recycle": "待回收",
+            "user_modules": []
+        }
+    }
+    return make_response(data=config)
+
+
+@user_bp.route('/admin/find/system_config/platform_setting/initial', methods=['GET'])
+@user_bp.route('/api/v3/admin/find/system_config/platform_setting/initial', methods=['GET'])
+@require_auth
+def get_default_config():
+    """获取默认的全局设置"""
+    import base64
+    
+    config = {
+        "backend": {
+            "max_biz_topo_level": 0,
+            "snapshot_biz_name": "蓝鲸"
+        },
+        "site": {
+            "name": {
+                "i18n": {
+                    "cn": "蓝鲸配置平台",
+                    "en": "BlueKing Configuration Platform"
+                }
+            },
+            "separator": "|"
+        },
+        "footer": {
+            "contact": {
+                "i18n": {
+                    "cn": "",
+                    "en": ""
+                }
+            },
+            "copyright": {
+                "i18n": {
+                    "cn": "",
+                    "en": ""
+                }
+            }
+        },
+        "validation_rules": {
+            "businessTopoInstNames": {
+                "value": base64.b64encode(b"^[^|/:*,<>\"?# ]*$").decode('utf-8'),
+                "i18n": {
+                    "cn": "格式不正确，不能包含特殊字符 | / : * , < > \" ? #及空格",
+                    "en": "Invalid format, cannot contain special characters | / : * , < > \" ? # or spaces"
+                }
+            }
+        },
+        "set": "空闲机池",
+        "idle_pool": {
+            "idle": "空闲机",
+            "fault": "故障机",
+            "recycle": "待回收",
+            "user_modules": []
+        }
+    }
+    return make_response(data=config)
+
+
 @user_bp.route('/api/v3/site/config', methods=['GET'])
 @user_bp.route('/site/config', methods=['GET'])
 def site_config():
