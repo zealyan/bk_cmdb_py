@@ -1,5 +1,6 @@
 from flask import Blueprint, request, jsonify, g
 from app.models.db import db, init_mock_data, get_db_connection
+from app.routes.user_routes import require_auth
 from datetime import datetime
 import time
 
@@ -129,6 +130,7 @@ def biz_search_web():
 
 
 @biz_bp.route('/biz/simplify', methods=['GET'])
+@require_auth
 def biz_simplify():
     """获取简化的业务列表"""
     try:
@@ -136,10 +138,28 @@ def biz_simplify():
         if conn is None:
             return make_response(result=False, code=500, message="数据库连接失败")
         
-        businesses = list(conn.cc_ApplicationBase.find(
-            {'bk_data_status': {'$ne': 'disabled'}},
-            {'bk_biz_id': 1, 'bk_biz_name': 1, '_id': 0}
-        ).sort('bk_biz_id', 1))
+        # 获取当前用户
+        current_username = getattr(g, 'current_user', None)
+        
+        # 如果有当前用户，只返回用户有权限的业务
+        if current_username:
+            user_biz_list = list(conn.user_business.find(
+                {'username': current_username},
+                {'bk_biz_id': 1, '_id': 0}
+            ))
+            user_biz_ids = [ub['bk_biz_id'] for ub in user_biz_list]
+            
+            businesses = list(conn.cc_ApplicationBase.find(
+                {'bk_biz_id': {'$in': user_biz_ids}, 'bk_data_status': {'$ne': 'disabled'}},
+                {'bk_biz_id': 1, 'bk_biz_name': 1, '_id': 0}
+            ).sort('bk_biz_id', 1))
+        else:
+            # 没有用户信息，返回所有业务
+            businesses = list(conn.cc_ApplicationBase.find(
+                {'bk_data_status': {'$ne': 'disabled'}},
+                {'bk_biz_id': 1, 'bk_biz_name': 1, '_id': 0}
+            ).sort('bk_biz_id', 1))
+        
         return make_response(data=businesses)
     except Exception as e:
         print(f"获取简化业务列表失败: {e}")
@@ -147,6 +167,7 @@ def biz_simplify():
 
 
 @biz_bp.route('/biz/with_reduced', methods=['GET'])
+@require_auth
 def biz_with_reduced():
     """获取带权限信息的业务列表"""
     try:
