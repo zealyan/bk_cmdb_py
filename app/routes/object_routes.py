@@ -23,7 +23,19 @@ def make_response(result=True, code=0, message="success", data=None, **kwargs):
 def find_object_classification():
     try:
         collection = get_mongo_collection('cc_ObjClassification')
-        classifications = list(collection.find({}, {'_id': 0}))
+        docs = collection.find({}, {'_id': 0})
+        classifications = []
+        seen_ids = set()
+        
+        for doc in docs:
+            class_id = doc.get("bk_classification_id")
+            if class_id and class_id not in seen_ids:
+                classifications.append(doc)
+                seen_ids.add(class_id)
+            elif not class_id:
+                # 如果没有 ID，直接添加
+                classifications.append(doc)
+        
         return make_response(data=classifications)
     except Exception as e:
         return make_response(result=False, code=500, message=str(e))
@@ -88,7 +100,19 @@ def find_object_att_group():
         if conn is None:
             return make_response(result=False, code=500, message="数据库连接失败")
         
-        groups = list(conn.cc_ObjAttGroup.find({}, {'_id': 0}))
+        docs = conn.cc_ObjAttGroup.find({}, {'_id': 0})
+        groups = []
+        seen_group_ids = set()
+        
+        for doc in docs:
+            group_id = doc.get("bk_group_id")
+            obj_id = doc.get("bk_obj_id")
+            unique_key = f"{obj_id}_{group_id}" if group_id and obj_id else str(id(doc))
+            
+            if unique_key not in seen_group_ids:
+                groups.append(doc)
+                seen_group_ids.add(unique_key)
+        
         return make_response(data=groups)
     except Exception as e:
         return make_response(result=False, code=500, message=str(e))
@@ -148,6 +172,8 @@ def find_object_attr():
 
         # 从数据库读取属性数据
         all_attributes = []
+        seen_prop_ids = set()  # 用于去重，避免重复的 bk_property_id
+        
         if obj_ids:
             collection = get_mongo_collection('cc_ObjAttDes')
             docs = collection.find({"bk_obj_id": {"$in": obj_ids}})
@@ -185,7 +211,12 @@ def find_object_attr():
                     attr["editable"] = True
                 if attr.get("isreadonly") is None:
                     attr["isreadonly"] = False
-                all_attributes.append(attr)
+                
+                # 去重：只添加没有见过的 bk_property_id
+                prop_id = attr.get("bk_property_id")
+                if prop_id and prop_id not in seen_prop_ids:
+                    all_attributes.append(attr)
+                    seen_prop_ids.add(prop_id)
         
         return make_response(data=all_attributes)
     except Exception as e:
