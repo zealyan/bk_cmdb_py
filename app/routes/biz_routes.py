@@ -174,7 +174,7 @@ def biz_with_reduced():
                 {'_id': 0}
             ).sort('bk_biz_id', 1))
         
-        return make_response(data={"info": businesses})
+        return make_response(data=businesses)
     except Exception as e:
         print(f"获取带权限信息的业务列表失败: {e}")
         return make_response(result=False, code=500, message=str(e))
