@@ -464,6 +464,150 @@ def user_info():
         return make_response(result=False, code=500, message=str(e))
 
 
+@user_bp.route('/proxy/get/usermanage/api/c/compapi/v2/usermanage/fs_list_users/', methods=['GET', 'POST'])
+@user_bp.route('/api/c/compapi/v2/usermanage/fs_list_users/', methods=['GET', 'POST'])
+@user_bp.route('/proxy/get/usermanage/api/c/compapi/v2/usermanage/list_users/', methods=['GET', 'POST'])
+def usermanage_list_users():
+    """蓝鲸用户管理API - 获取用户列表
+    
+    支持蓝鲸用户选择器组件调用，提供用户搜索和列表功能。
+    
+    Query Parameters (GET) or Request Body (POST):
+        fuzzy_lookups: 模糊搜索关键词
+        page: 页码
+        page_size: 每页数量
+        exact_lookups: 精确匹配用户名列表
+    
+    Response (JSON):
+        {
+            "code": 0,
+            "message": "success",
+            "result": true,
+            "data": {
+                "count": 3,
+                "results": [
+                    {
+                        "id": 1,
+                        "username": "admin",
+                        "display_name": "Administrator",
+                        "domain": "default.local",
+                        "logo": null,
+                        "category_id": 1,
+                        "category_name": "默认目录"
+                    }
+                ]
+            }
+        }
+    """
+    try:
+        conn = get_db_connection()
+        if conn is None:
+            return jsonify({
+                "code": 500,
+                "message": "数据库连接失败",
+                "result": False,
+                "data": {"count": 0, "results": []}
+            })
+        
+        # 获取请求参数（同时支持 GET 和 POST）
+        params = {}
+        if request.method == 'GET':
+            params = request.args.to_dict()
+        elif request.is_json:
+            params = request.get_json() or {}
+        elif request.form:
+            params = request.form.to_dict()
+        elif request.data:
+            try:
+                import json
+                params = json.loads(request.data)
+            except:
+                pass
+        
+        # 解析分页参数
+        page = int(params.get('page', 1))
+        page_size = int(params.get('page_size', 20))
+        start = (page - 1) * page_size
+        
+        # 构建查询条件
+        query = {}
+        
+        # 支持模糊搜索
+        fuzzy_lookups = params.get('fuzzy_lookups', '')
+        if fuzzy_lookups:
+            import re
+            regex = re.compile(fuzzy_lookups, re.IGNORECASE)
+            query['$or'] = [
+                {'username': {'$regex': regex}},
+                {'display_name': {'$regex': regex}}
+            ]
+        
+        # 支持精确搜索（逗号分隔的用户名列表）
+        exact_lookups = params.get('exact_lookups', '')
+        if exact_lookups:
+            usernames = [u.strip() for u in exact_lookups.split(',') if u.strip()]
+            if usernames:
+                query['username'] = {'$in': usernames}
+        
+        # 查询用户数据
+        users = list(conn.users.find(query).skip(start).limit(page_size))
+        total_count = conn.users.count_documents(query)
+        
+        # 转换为蓝鲸用户管理API格式
+        results = []
+        for idx, user in enumerate(users):
+            results.append({
+                "id": idx + 1,
+                "username": user.get('username', ''),
+                "display_name": user.get('display_name', user.get('username', '')),
+                "domain": "default.local",
+                "logo": None,
+                "category_id": 1,
+                "category_name": "默认目录"
+            })
+        
+        # 检查是否有 JSONP 回调
+        callback = request.args.get('callback')
+        response_data = {
+            "code": 0,
+            "message": "success",
+            "result": True,
+            "data": {
+                "count": total_count,
+                "results": results
+            }
+        }
+        
+        if callback:
+            # 返回 JSONP 格式
+            import json
+            return f"{callback}({json.dumps(response_data, ensure_ascii=False)})", 200, {
+                'Content-Type': 'application/javascript; charset=utf-8'
+            }
+        
+        return jsonify(response_data)
+        
+    except Exception as e:
+        print(f"获取用户列表失败: {e}")
+        import traceback
+        traceback.print_exc()
+        error_response = {
+            "code": 500,
+            "message": f"获取用户列表失败: {str(e)}",
+            "result": False,
+            "data": {"count": 0, "results": []}
+        }
+        
+        callback = request.args.get('callback')
+        if callback:
+            import json
+            return f"{callback}({json.dumps(error_response, ensure_ascii=False)})", 200, {
+                'Content-Type': 'application/javascript; charset=utf-8'
+            }
+        
+        return jsonify(error_response)
+
+
 @user_bp.route('/api/v3/site/config', methods=['GET'])
 @user_bp.route('/site/config', methods=['GET'])
 def site_config():
@@ -478,7 +622,8 @@ def site_config():
             "message": "success",
             "data": {
                 "login": "skip-login" | "internal" | "",
-                "authscheme": "internal" | "iam"
+                "authscheme": "internal" | "iam",
+                "userManage": "http://localhost:8080/api/c/compapi/v2/usermanage/fs_list_users/"
             }
         }
     """
@@ -486,5 +631,6 @@ def site_config():
     
     return make_response(data={
         "login": login_version,
-        "authscheme": "internal"
+        "authscheme": "internal",
+        "userManage": "/api/c/compapi/v2/usermanage/fs_list_users/"
     })
