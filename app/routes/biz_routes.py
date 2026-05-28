@@ -191,7 +191,7 @@ def biz_simplify():
                 {'bk_biz_id': 1, 'bk_biz_name': 1, '_id': 0}
             ).sort('bk_biz_id', 1))
         
-        return make_response(info=businesses)
+        return make_response(data=businesses, info=businesses)
     except Exception as e:
         print(f"获取简化业务列表失败: {e}")
         return make_response(result=False, code=500, message=str(e))
@@ -230,7 +230,7 @@ def biz_with_reduced():
                 {'_id': 0}
             ).sort('bk_biz_id', 1))
         
-        return make_response(info=businesses)
+        return make_response(data=businesses, info=businesses)
     except Exception as e:
         print(f"获取带权限信息的业务列表失败: {e}")
         return make_response(result=False, code=500, message=str(e))
