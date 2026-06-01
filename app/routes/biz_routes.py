@@ -1,18 +1,23 @@
 from flask import Blueprint, request, jsonify, g
 from app.models.db import db, init_mock_data, get_db_connection
+from app.routes.user_routes import require_auth
 from datetime import datetime
 import time
 
 biz_bp = Blueprint('biz', __name__)
 
 
-def make_response(result=True, code=0, message="success", data=None):
-    return jsonify({
+def make_response(result=True, code=0, message="success", data=None, **kwargs):
+    response = {
         "result": result,
         "code": code,
-        "message": message,
-        "data": data
-    })
+        "message": message
+    }
+    if data is not None:
+        response["data"] = data
+    # 添加额外的字段到响应顶层
+    response.update(kwargs)
+    return jsonify(response)
 
 
 def get_current_time():
@@ -60,6 +65,7 @@ def build_query_conditions(condition):
 
 
 @biz_bp.route('/biz/search/<account>', methods=['POST'])
+@require_auth
 def biz_search(account):
     """按条件搜索业务"""
     try:
@@ -93,6 +99,35 @@ def biz_search(account):
         if 'bk_data_status' not in query:
             query['bk_data_status'] = {'$ne': 'disabled'}
         
+        # 获取当前用户
+        current_username = getattr(g, 'current_user', None)
+        
+        # 如果有当前用户，只返回用户有权限的业务
+        if current_username:
+            user_biz_list = list(conn.user_business.find(
+                {'username': current_username},
+                {'bk_biz_id': 1, '_id': 0}
+            ))
+            user_biz_ids = [ub['bk_biz_id'] for ub in user_biz_list]
+            
+            # 添加用户权限过滤
+            if user_biz_ids:
+                if 'bk_biz_id' in query:
+                    # 如果已有 bk_biz_id 条件，取交集
+                    if isinstance(query['bk_biz_id'], dict):
+                        if '$in' in query['bk_biz_id']:
+                            query['bk_biz_id']['$in'] = [biz_id for biz_id in query['bk_biz_id']['$in'] if biz_id in user_biz_ids]
+                        else:
+                            query['bk_biz_id'] = {'$in': user_biz_ids}
+                    else:
+                        # 如果是单个值
+                        if query['bk_biz_id'] in user_biz_ids:
+                            pass  # 保持原样
+                        else:
+                            query['bk_biz_id'] = {'$in': []}  # 没有权限
+                else:
+                    query['bk_biz_id'] = {'$in': user_biz_ids}
+        
         # 查询数据
         cursor = conn.cc_ApplicationBase.find(query)
         
@@ -112,37 +147,75 @@ def biz_search(account):
         for biz in businesses:
             biz.pop('_id', None)
         
-        return make_response(data={"count": total_count, "info": businesses})
+        return make_response(info=businesses, count=total_count)
     except Exception as e:
         print(f"搜索业务失败: {e}")
         return make_response(result=False, code=500, message=str(e))
 
 
 @biz_bp.route('/biz/search/web', methods=['POST'])
+@require_auth
 def biz_search_web():
     """Web端搜索业务（与search接口相同，为了兼容性）"""
     return biz_search('0')
 
 
+@biz_bp.route('/test/headers', methods=['GET'])
+def test_headers():
+    """测试请求头"""
+    all_headers = dict(request.headers)
+    return jsonify({
+        "result": True,
+        "code": 0,
+        "message": "success",
+        "data": {
+            "all_headers": all_headers,
+            "BK_User": request.headers.get('BK_User'),
+            "HTTP_BK_USER": request.headers.get('HTTP_BK_USER'),
+        }
+    })
+
+
 @biz_bp.route('/biz/simplify', methods=['GET'])
+@require_auth
 def biz_simplify():
     """获取简化的业务列表"""
+    import sys
+    print(f"[BizSimplify Debug] In biz_simplify, g.current_user={getattr(sys.modules['flask'], 'g', None) if 'flask' in sys.modules else 'N/A'}", file=sys.stdout)
+    sys.stdout.flush()
     try:
         conn = get_db_connection()
         if conn is None:
             return make_response(result=False, code=500, message="数据库连接失败")
         
-        businesses = list(conn.cc_ApplicationBase.find(
-            {'bk_data_status': {'$ne': 'disabled'}},
-            {'bk_biz_id': 1, 'bk_biz_name': 1, '_id': 0}
-        ).sort('bk_biz_id', 1))
-        return make_response(data={"info": businesses})
+        current_username = getattr(g, 'current_user', None)
+        
+        if current_username:
+            user_biz_list = list(conn.user_business.find(
+                {'username': current_username},
+                {'bk_biz_id': 1, '_id': 0}
+            ))
+            user_biz_ids = [ub['bk_biz_id'] for ub in user_biz_list]
+            
+            businesses = list(conn.cc_ApplicationBase.find(
+                {'bk_biz_id': {'$in': user_biz_ids}, 'bk_data_status': {'$ne': 'disabled'}},
+                {'bk_biz_id': 1, 'bk_biz_name': 1, '_id': 0}
+            ).sort('bk_biz_id', 1))
+        else:
+            businesses = list(conn.cc_ApplicationBase.find(
+                {'bk_data_status': {'$ne': 'disabled'}},
+                {'bk_biz_id': 1, 'bk_biz_name': 1, '_id': 0}
+            ).sort('bk_biz_id', 1))
+        
+        return make_response(data={'count': len(businesses), 'info': businesses}, info=businesses)
     except Exception as e:
         print(f"获取简化业务列表失败: {e}")
         return make_response(result=False, code=500, message=str(e))
 
 
 @biz_bp.route('/biz/with_reduced', methods=['GET'])
+@biz_bp.route('/findmany/biz/with_reduced', methods=['GET'])
+@require_auth
 def biz_with_reduced():
     """获取带权限信息的业务列表"""
     try:
@@ -174,7 +247,7 @@ def biz_with_reduced():
                 {'_id': 0}
             ).sort('bk_biz_id', 1))
         
-        return make_response(data={"info": businesses})
+        return make_response(data=businesses, info=businesses)
     except Exception as e:
         print(f"获取带权限信息的业务列表失败: {e}")
         return make_response(result=False, code=500, message=str(e))
@@ -410,4 +483,27 @@ def get_business_by_id(biz_id):
         return make_response(data=business)
     except Exception as e:
         print(f"获取业务详情失败: {e}")
+        return make_response(result=False, code=500, message=str(e))
+
+
+@biz_bp.route('/biz_set/with_reduced', methods=['GET'])
+@biz_bp.route('/findmany/biz_set/with_reduced', methods=['GET'])
+@require_auth
+def biz_set_with_reduced():
+    """获取带权限信息的业务集列表"""
+    try:
+        conn = get_db_connection()
+
+        if conn is None:
+            return make_response(result=False, code=500, message="数据库连接失败")
+        
+        # 查询业务集数据
+        biz_sets = list(conn.cc_BizSet.find(
+            {'bk_data_status': {'$ne': 'disabled'}},
+            {'_id': 0}
+        ).sort('bk_biz_set_id', 1))
+        
+        return make_response(data=biz_sets, info=biz_sets)
+    except Exception as e:
+        print(f"获取业务集列表失败: {e}")
         return make_response(result=False, code=500, message=str(e))

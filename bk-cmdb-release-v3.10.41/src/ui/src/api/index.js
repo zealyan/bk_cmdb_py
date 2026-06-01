@@ -29,7 +29,7 @@ const randomString = (length, chars) => {
 
 // axios实例
 const axiosInstance = Axios.create({
-  baseURL: 'http://localhost:9090/proxy/api/v3',
+  baseURL: window.API_PREFIX || 'http://localhost:9090/proxy/api/v3',
   xsrfCookieName: 'data_csrftoken',
   xsrfHeaderName: 'X-CSRFToken',
   withCredentials: true

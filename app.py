@@ -1,4 +1,4 @@
-from flask import Flask, jsonify
+from flask import Flask, jsonify, request
 from flask_cors import CORS
 from flask_session import Session
 from app.config import Config
@@ -17,29 +17,17 @@ app.config.from_object(Config)
 
 Session(app)
 
-CORS(app, supports_credentials=True, resources={
-    r"/*": {
-        "origins": "*",
-        "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-        "allow_headers": ["Content-Type", "Authorization", "X-Requested-With", "X-CSRFToken"]
-    }
-})
+# 配置 CORS，支持 withCredentials
+CORS(app, supports_credentials=True, origins=['http://localhost:8080', 'http://127.0.0.1:8080'])
 
-# 同时注册两个版本的路由：带 /api/v3 前缀和不带前缀
-app.register_blueprint(user_bp)
-app.register_blueprint(user_bp, url_prefix='/api/v3', name='user_v3')
-app.register_blueprint(biz_bp)
-app.register_blueprint(biz_bp, url_prefix='/api/v3', name='biz_v3')
-app.register_blueprint(admin_bp)
-app.register_blueprint(admin_bp, url_prefix='/api/v3', name='admin_v3')
-app.register_blueprint(object_bp)
-app.register_blueprint(object_bp, url_prefix='/api/v3', name='object_v3')
-app.register_blueprint(auth_bp)
-app.register_blueprint(auth_bp, url_prefix='/api/v3', name='auth_v3')
-app.register_blueprint(set_bp)
-app.register_blueprint(set_bp, url_prefix='/api/v3', name='set_v3')
-app.register_blueprint(module_bp)
-app.register_blueprint(module_bp, url_prefix='/api/v3', name='module_v3')
+# 注册路由蓝图（带 /api/v3 前缀的版本）
+app.register_blueprint(user_bp, url_prefix='/api/v3')
+app.register_blueprint(biz_bp, url_prefix='/api/v3')
+app.register_blueprint(admin_bp, url_prefix='/api/v3')
+app.register_blueprint(object_bp, url_prefix='/api/v3')
+app.register_blueprint(auth_bp, url_prefix='/api/v3')
+app.register_blueprint(set_bp, url_prefix='/api/v3')
+app.register_blueprint(module_bp, url_prefix='/api/v3')
 
 
 def init_data():
@@ -47,6 +35,10 @@ def init_data():
     # 初始化权限策略
     init_admin_super_permission()
     init_default_policies()
+
+
+
+
 
 
 @app.route('/')
@@ -117,4 +109,4 @@ def internal_error(error):
 
 if __name__ == '__main__':
     init_data()
-    app.run(host='0.0.0.0', port=3000, debug=True)
+    app.run(host='0.0.0.0', port=3000, debug=False, use_reloader=False)

@@ -60,6 +60,15 @@ const getCommonPlugins = config => ([
     excludeChunks: ['app']
   }),
 
+  new HtmlWebpackPlugin({
+    filename: 'index-skip-login.html',
+    template: 'index.skip-login.html',
+    config: modeValue(config.build.config, config.dev.config),
+    templateParameters: modeValue(prodEnv, devEnv),
+    excludeChunks: ['login'],
+    minify: false
+  }),
+
   new CopyPlugin({
     patterns: [
       {

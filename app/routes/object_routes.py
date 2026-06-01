@@ -1,17 +1,68 @@
 from datetime import datetime
-from flask import Blueprint, jsonify, request
+from flask import Blueprint, jsonify, request, g
 from app.models.db import db, get_db_connection, get_mongo_collection
 
 object_bp = Blueprint('object', __name__)
 
+# 原项目权限错误码
+PERMISSION_DENIED_CODE = 9900403
 
-def make_response(result=True, code=0, message="success", data=None):
-    return jsonify({
+
+def make_response(result=True, code=0, message="success", data=None, **kwargs):
+    response = {
         "result": result,
         "code": code,
-        "message": message,
-        "data": data
+        "message": message
+    }
+    if data is not None:
+        response["data"] = data
+    # 添加额外的字段到响应顶层
+    response.update(kwargs)
+    return jsonify(response)
+
+
+def check_user_biz_permission(username, biz_id):
+    """检查用户是否有权限访问特定业务
+    
+    Args:
+        username: 用户名
+        biz_id: 业务ID
+        
+    Returns:
+        bool: 有权限返回True，否则返回False
+    """
+    conn = get_db_connection()
+    if conn is None:
+        return False
+    
+    # 检查用户是否有该业务的访问权限
+    user_biz = conn.user_business.find_one({
+        'username': username,
+        'bk_biz_id': biz_id
     })
+    
+    return user_biz is not None
+
+
+def get_user_accessible_biz_ids(username):
+    """获取用户可访问的所有业务ID列表
+    
+    Args:
+        username: 用户名
+        
+    Returns:
+        list: 业务ID列表
+    """
+    conn = get_db_connection()
+    if conn is None:
+        return []
+    
+    user_biz_list = list(conn.user_business.find(
+        {'username': username},
+        {'bk_biz_id': 1, '_id': 0}
+    ))
+    
+    return [ub['bk_biz_id'] for ub in user_biz_list]
 
 
 @object_bp.route('/api/v3/find/objectclassification', methods=['POST'])
@@ -19,8 +70,20 @@ def make_response(result=True, code=0, message="success", data=None):
 def find_object_classification():
     try:
         collection = get_mongo_collection('cc_ObjClassification')
-        classifications = list(collection.find({}, {'_id': 0}))
-        return make_response(data={"info": classifications})
+        docs = collection.find({}, {'_id': 0})
+        classifications = []
+        seen_ids = set()
+        
+        for doc in docs:
+            class_id = doc.get("bk_classification_id")
+            if class_id and class_id not in seen_ids:
+                classifications.append(doc)
+                seen_ids.add(class_id)
+            elif not class_id:
+                # 如果没有 ID，直接添加
+                classifications.append(doc)
+        
+        return make_response(data=classifications)
     except Exception as e:
         return make_response(result=False, code=500, message=str(e))
 
@@ -68,7 +131,7 @@ def find_object_association():
                 "is_pre": True
             }
         ]
-        return make_response(data={"info": associations})
+        return make_response(data=associations)
     except Exception as e:
         import traceback
         traceback.print_exc()
@@ -84,8 +147,20 @@ def find_object_att_group():
         if conn is None:
             return make_response(result=False, code=500, message="数据库连接失败")
         
-        groups = list(conn.cc_ObjAttGroup.find({}, {'_id': 0}))
-        return make_response(data={"info": groups})
+        docs = conn.cc_ObjAttGroup.find({}, {'_id': 0})
+        groups = []
+        seen_group_ids = set()
+        
+        for doc in docs:
+            group_id = doc.get("bk_group_id")
+            obj_id = doc.get("bk_obj_id")
+            unique_key = f"{obj_id}_{group_id}" if group_id and obj_id else str(id(doc))
+            
+            if unique_key not in seen_group_ids:
+                groups.append(doc)
+                seen_group_ids.add(unique_key)
+        
+        return make_response(data=groups)
     except Exception as e:
         return make_response(result=False, code=500, message=str(e))
 
@@ -144,6 +219,19 @@ def find_object_attr():
 
         # 从数据库读取属性数据
         all_attributes = []
+        seen_prop_ids = set()  # 用于去重，避免重复的 bk_property_id
+        
+        # 前端会自动添加的 ID 属性，避免重复
+        auto_add_id_props = {
+            'biz': 'bk_biz_id',
+            'host': 'bk_host_id',
+            'set': 'bk_set_id',
+            'module': 'bk_module_id',
+            'process': 'bk_process_id',
+            'plat': 'bk_cloud_id',
+            'biz_set': 'bk_biz_set_id'
+        }
+        
         if obj_ids:
             collection = get_mongo_collection('cc_ObjAttDes')
             docs = collection.find({"bk_obj_id": {"$in": obj_ids}})
@@ -181,7 +269,20 @@ def find_object_attr():
                     attr["editable"] = True
                 if attr.get("isreadonly") is None:
                     attr["isreadonly"] = False
-                all_attributes.append(attr)
+                
+                # 去重：只添加没有见过的 bk_property_id
+                prop_id = attr.get("bk_property_id")
+                obj_type = attr.get("bk_obj_id")
+                
+                # 避免返回前端会自动添加的 ID 属性
+                if prop_id and prop_id not in seen_prop_ids:
+                    # 检查是否是会被前端自动添加的 ID 属性
+                    auto_prop = auto_add_id_props.get(obj_type)
+                    if auto_prop and prop_id == auto_prop:
+                        # 跳过这个属性，因为前端会自动添加
+                        continue
+                    all_attributes.append(attr)
+                    seen_prop_ids.add(prop_id)
         
         return make_response(data=all_attributes)
     except Exception as e:
@@ -320,7 +421,7 @@ def find_classification_object():
                 class_map[cls_id]["bk_objects"].append(obj)
         
         class_data = list(class_map.values())
-        return make_response(data={"info": class_data})
+        return make_response(data=class_data)
     except Exception as e:
         import traceback
         traceback.print_exc()
@@ -385,6 +486,34 @@ def find_topo_path(biz_id):
         req_data = request.get_json() or {}
         # 返回从根节点到目标节点的路径
         return make_response(data=[])
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return make_response(result=False, code=500, message=str(e))
+
+
+@object_bp.route('/api/v3/find/biz_set/topo_path', methods=['POST'])
+@object_bp.route('/find/biz_set/topo_path', methods=['POST'])
+def find_biz_set_topo_path():
+    """获取业务集拓扑路径"""
+    try:
+        req_data = request.get_json() or {}
+        bk_biz_set_id = req_data.get('bk_biz_set_id')
+        bk_parent_obj_id = req_data.get('bk_parent_obj_id')
+        bk_parent_id = req_data.get('bk_parent_id')
+        
+        # 构建拓扑路径
+        path = []
+        
+        # 添加业务集节点
+        path.append({
+            "bk_obj_id": "bk_biz_set_obj",
+            "bk_obj_name": "业务集",
+            "bk_inst_id": bk_biz_set_id,
+            "bk_inst_name": f"业务集_{bk_biz_set_id}"
+        })
+        
+        return make_response(data=path)
     except Exception as e:
         import traceback
         traceback.print_exc()
@@ -654,11 +783,31 @@ def find_topo_inst_with_statistics(bk_biz_id):
         if conn is None:
             return make_response(result=False, code=500, message="数据库连接失败")
 
+        # 获取当前用户
+        current_username = getattr(g, 'current_user', None)
+        
+        # 检查用户权限（如果能获取到用户名，必须检查权限）
+        accessible_biz_ids = []
+        if current_username:
+            accessible_biz_ids = get_user_accessible_biz_ids(current_username)
+        
+        # 如果有用户名但没有可访问的业务，或者请求的业务不在可访问列表中，返回空结果
+        if current_username and bk_biz_id not in accessible_biz_ids:
+            return make_response(data=[])
+
         # 查询业务数据
         business = conn.cc_ApplicationBase.find_one({"bk_biz_id": bk_biz_id})
         if not business:
-            # 如果没有找到指定业务，返回第一个启用的业务
-            business = conn.cc_ApplicationBase.find_one({"bk_data_status": {"$ne": "disabled"}})
+            # 如果没有找到指定业务，且用户有可访问的业务，返回第一个用户有权限的业务
+            if current_username and accessible_biz_ids:
+                for biz_id in accessible_biz_ids:
+                    business = conn.cc_ApplicationBase.find_one({"bk_biz_id": biz_id})
+                    if business:
+                        bk_biz_id = biz_id
+                        break
+            else:
+                # 如果没有任何用户信息，返回空结构
+                return make_response(data=[])
         
         if not business:
             # 如果没有任何业务，返回空结构
@@ -866,11 +1015,26 @@ def find_business_topo_inst(bk_biz_id):
         if conn is None:
             return make_response(result=False, code=500, message="数据库连接失败")
 
+        # 获取当前用户
+        current_username = getattr(g, 'current_user', None)
+        
+        # 检查用户权限
+        accessible_biz_ids = []
+        if current_username:
+            accessible_biz_ids = get_user_accessible_biz_ids(current_username)
+            if bk_biz_id not in accessible_biz_ids:
+                return make_response(result=False, code=PERMISSION_DENIED_CODE, message="暂无该业务权限或业务不存在")
+
         # 查询业务信息
         business = conn.cc_ApplicationBase.find_one({"bk_biz_id": bk_biz_id})
         if not business:
-            # 如果没有找到指定业务，返回第一个启用的业务
-            business = conn.cc_ApplicationBase.find_one({"bk_data_status": {"$ne": "disabled"}})
+            # 如果没有找到指定业务，返回第一个用户有权限的业务
+            if current_username and accessible_biz_ids:
+                for biz_id in accessible_biz_ids:
+                    business = conn.cc_ApplicationBase.find_one({"bk_biz_id": biz_id})
+                    if business:
+                        bk_biz_id = biz_id
+                        break
         
         if not business:
             return make_response(result=False, code=404, message="业务不存在")
@@ -1197,6 +1361,62 @@ def find_module_host_relation(bk_biz_id):
             "count": total_count,
             "relation": relation
         })
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return make_response(result=False, code=500, message=str(e))
+
+
+@object_bp.route('/api/v3/usercustom/user/search', methods=['POST'])
+@object_bp.route('/usercustom/user/search', methods=['POST'])
+def usercustom_user_search():
+    """用户自定义搜索用户"""
+    try:
+        conn = get_db_connection()
+        if conn is None:
+            return make_response(result=False, code=500, message="数据库连接失败")
+        
+        # 获取请求数据
+        req_data = {}
+        if request.is_json:
+            req_data = request.get_json() or {}
+        elif request.form:
+            req_data = request.form.to_dict()
+        elif request.data:
+            try:
+                import json
+                req_data = json.loads(request.data)
+            except:
+                req_data = {}
+        
+        # 查询用户
+        users = list(conn.users.find({}, {'_id': 0}))
+        
+        return make_response(data={"count": len(users), "info": users})
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return make_response(result=False, code=500, message=str(e))
+
+
+@object_bp.route('/api/v3/usercustom/default/model', methods=['POST'])
+@object_bp.route('/usercustom/default/model', methods=['POST'])
+def usercustom_default_model():
+    """用户自定义默认模型"""
+    try:
+        return make_response(data={})
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return make_response(result=False, code=500, message=str(e))
+
+
+@object_bp.route('/api/v3/find/topoinst/biz_set/<int:biz_set_id>', methods=['POST'])
+@object_bp.route('/find/topoinst/biz_set/<int:biz_set_id>', methods=['POST'])
+def find_biz_set_topo_inst(biz_set_id):
+    """获取业务集拓扑实例"""
+    try:
+        return make_response(data=[])
     except Exception as e:
         import traceback
         traceback.print_exc()

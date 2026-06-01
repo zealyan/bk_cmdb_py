@@ -34,7 +34,7 @@
     <!-- built files will be auto injected -->
     <script type="text/javascript">
         window.Site = {
-            url: "http://localhost:9090/proxy/",
+            url: "http://localhost:8080/proxy/",
             version: "v3",
             login: "",
             agent: "",
@@ -52,10 +52,10 @@
             account: '0'
         }
         window.ESB = {
-          userManage: ""
+          userManage: "http://localhost:8080/api/c/compapi/v2/usermanage/fs_list_users/"
         }
         // 使用代理地址
-        window.API_HOST = "http://localhost:9090/proxy/"
+        window.API_HOST = "http://localhost:8080/proxy/"
         window.API_PREFIX = API_HOST + 'api/' + Site.version
     </script>
   </body>

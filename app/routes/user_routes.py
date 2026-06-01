@@ -1,3 +1,7 @@
+import logging
+logging.basicConfig(level=logging.DEBUG, format='%(asctime)s [%(levelname)s] %(message)s')
+logger = logging.getLogger(__name__)
+
 from flask import Blueprint, request, jsonify, session as flask_session, g
 from functools import wraps
 from app.models.db import db, get_db_connection, INIT_DATA, init_mock_data
@@ -8,19 +12,28 @@ from app.config import Config
 user_bp = Blueprint('user', __name__)
 
 
-def make_response(result=True, code=0, message="success", data=None):
-    return jsonify({
+def make_response(result=True, code=0, message="success", data=None, **kwargs):
+    response = {
         "result": result,
         "code": code,
-        "message": message,
-        "data": data
-    })
+        "message": message
+    }
+    if data is not None:
+        response["data"] = data
+    # 添加额外的字段到响应顶层
+    response.update(kwargs)
+    return jsonify(response)
 
 
 def require_auth(f):
     """登录验证装饰器
     
-    检查请求中的 Token 是否有效，用于保护需要登录才能访问的接口。
+    检查请求中的 Token 或 HTTP 头用户信息是否有效，用于保护需要登录才能访问的接口。
+    支持以下认证方式（按优先级）：
+    1. HTTP 头中的 BK_User (原项目标准)
+    2. Cookie 中的 bk_token
+    3. Authorization Bearer Token
+    
     当 SKIP_LOGIN 配置启用时，自动使用管理员账户。
     
     Args:
@@ -34,23 +47,65 @@ def require_auth(f):
     """
     @wraps(f)
     def wrapper(*args, **kwargs):
-        # Skip Login 模式：自动使用配置的用户
+        bk_user = None
+        supplier_account = None
+        
+        headers_dict = dict(request.headers)
+        headers_lower = {k.lower().replace('-', '_'): v for k, v in request.headers}
+        
+        logger.debug(f"All headers: {headers_dict}")
+        logger.debug(f"Headers lower: {headers_lower}")
+        
+        if 'bk_user' in headers_lower:
+            bk_user = headers_lower['bk_user']
+            logger.debug(f"Found BK_User: {bk_user}")
+        
+        if 'http_blueking_supplier_id' in headers_lower:
+            supplier_account = headers_lower['http_blueking_supplier_id']
+        elif 'blueking_supplier_id' in headers_lower:
+            supplier_account = headers_lower['blueking_supplier_id']
+        
+        logger.debug(f"bk_user={bk_user}, supplier_account={supplier_account}, SKIP_LOGIN={Config.SKIP_LOGIN}")
+        
+        if bk_user:
+            conn = get_db_connection()
+            if conn:
+                user = conn.users.find_one({"username": bk_user})
+                if user:
+                    g.current_user = bk_user
+                    g.user_info = {
+                        'display_name': user.get('display_name', bk_user),
+                        'role': user.get('role', 'user')
+                    }
+                    g.supplier_account = supplier_account or '0'
+                    return f(*args, **kwargs)
+                else:
+                    g.current_user = bk_user
+                    g.user_info = {
+                        'display_name': bk_user,
+                        'role': 'admin'
+                    }
+                    g.supplier_account = supplier_account or '0'
+                    return f(*args, **kwargs)
+        
         if Config.SKIP_LOGIN:
             g.current_user = Config.SKIP_LOGIN_USER
             g.user_info = {
                 'display_name': 'Administrator',
                 'role': 'admin'
             }
+            g.supplier_account = '0'
             return f(*args, **kwargs)
         
         token = request.cookies.get('bk_token')
         
         if not token:
-            token = request.headers.get('Authorization')
-            if token and token.startswith('Bearer '):
-                token = token[7:]
+            auth_header = request.headers.get('Authorization')
+            if auth_header and auth_header.startswith('Bearer '):
+                token = auth_header[7:]
         
         if not token:
+            print(f"[Auth Debug] No auth found. BK_User={bk_user}, Token={token}, Headers={dict(request.headers)}")
             return make_response(
                 result=False,
                 code=401,
@@ -67,6 +122,7 @@ def require_auth(f):
         
         g.current_user = session_data['username']
         g.user_info = session_data.get('user_info', {})
+        g.supplier_account = supplier_account or '0'
         
         return f(*args, **kwargs)
     
@@ -411,3 +467,287 @@ def user_info():
         })
     except Exception as e:
         return make_response(result=False, code=500, message=str(e))
+
+
+@user_bp.route('/proxy/get/usermanage/api/c/compapi/v2/usermanage/fs_list_users/', methods=['GET', 'POST'])
+@user_bp.route('/api/c/compapi/v2/usermanage/fs_list_users/', methods=['GET', 'POST'])
+@user_bp.route('/proxy/get/usermanage/api/c/compapi/v2/usermanage/list_users/', methods=['GET', 'POST'])
+def usermanage_list_users():
+    """蓝鲸用户管理API - 获取用户列表
+    
+    支持蓝鲸用户选择器组件调用，提供用户搜索和列表功能。
+    
+    Query Parameters (GET) or Request Body (POST):
+        fuzzy_lookups: 模糊搜索关键词
+        page: 页码
+        page_size: 每页数量
+        exact_lookups: 精确匹配用户名列表
+    
+    Response (JSON):
+        {
+            "code": 0,
+            "message": "success",
+            "result": true,
+            "data": {
+                "count": 3,
+                "results": [
+                    {
+                        "id": 1,
+                        "username": "admin",
+                        "display_name": "Administrator",
+                        "domain": "default.local",
+                        "logo": null,
+                        "category_id": 1,
+                        "category_name": "默认目录"
+                    }
+                ]
+            }
+        }
+    """
+    try:
+        conn = get_db_connection()
+        if conn is None:
+            return jsonify({
+                "code": 500,
+                "message": "数据库连接失败",
+                "result": False,
+                "data": {"count": 0, "results": []}
+            })
+        
+        # 获取请求参数（同时支持 GET 和 POST）
+        params = {}
+        if request.method == 'GET':
+            params = request.args.to_dict()
+        elif request.is_json:
+            params = request.get_json() or {}
+        elif request.form:
+            params = request.form.to_dict()
+        elif request.data:
+            try:
+                import json
+                params = json.loads(request.data)
+            except:
+                pass
+        
+        # 解析分页参数
+        page = int(params.get('page', 1))
+        page_size = int(params.get('page_size', 20))
+        start = (page - 1) * page_size
+        
+        # 构建查询条件
+        query = {}
+        
+        # 支持模糊搜索
+        fuzzy_lookups = params.get('fuzzy_lookups', '')
+        if fuzzy_lookups:
+            import re
+            regex = re.compile(fuzzy_lookups, re.IGNORECASE)
+            query['$or'] = [
+                {'username': {'$regex': regex}},
+                {'display_name': {'$regex': regex}}
+            ]
+        
+        # 支持精确搜索（逗号分隔的用户名列表）
+        exact_lookups = params.get('exact_lookups', '')
+        if exact_lookups:
+            usernames = [u.strip() for u in exact_lookups.split(',') if u.strip()]
+            if usernames:
+                query['username'] = {'$in': usernames}
+        
+        # 查询用户数据
+        users = list(conn.users.find(query).skip(start).limit(page_size))
+        total_count = conn.users.count_documents(query)
+        
+        # 转换为蓝鲸用户管理API格式
+        results = []
+        for idx, user in enumerate(users):
+            results.append({
+                "id": idx + 1,
+                "username": user.get('username', ''),
+                "display_name": user.get('display_name', user.get('username', '')),
+                "domain": "default.local",
+                "logo": None,
+                "category_id": 1,
+                "category_name": "默认目录"
+            })
+        
+        # 检查是否有 JSONP 回调
+        callback = request.args.get('callback')
+        response_data = {
+            "code": 0,
+            "message": "success",
+            "result": True,
+            "data": {
+                "count": total_count,
+                "results": results
+            }
+        }
+        
+        if callback:
+            # 返回 JSONP 格式
+            import json
+            return f"{callback}({json.dumps(response_data, ensure_ascii=False)})", 200, {
+                'Content-Type': 'application/javascript; charset=utf-8'
+            }
+        
+        return jsonify(response_data)
+        
+    except Exception as e:
+        print(f"获取用户列表失败: {e}")
+        import traceback
+        traceback.print_exc()
+        error_response = {
+            "code": 500,
+            "message": f"获取用户列表失败: {str(e)}",
+            "result": False,
+            "data": {"count": 0, "results": []}
+        }
+        
+        callback = request.args.get('callback')
+        if callback:
+            import json
+            return f"{callback}({json.dumps(error_response, ensure_ascii=False)})", 200, {
+                'Content-Type': 'application/javascript; charset=utf-8'
+            }
+        
+        return jsonify(error_response)
+
+
+@user_bp.route('/admin/find/system_config/platform_setting/current', methods=['GET'])
+@user_bp.route('/api/v3/admin/find/system_config/platform_setting/current', methods=['GET'])
+@require_auth
+def get_current_config():
+    """获取当前用户的全局设置"""
+    # 导入 Base64 编码
+    import base64
+    
+    # 默认全局配置，包含验证规则（按照前端期望的格式）
+    config = {
+        "backend": {
+            "max_biz_topo_level": 0,
+            "snapshot_biz_name": "蓝鲸"
+        },
+        "site": {
+            "name": {
+                "i18n": {
+                    "cn": "蓝鲸配置平台",
+                    "en": "BlueKing Configuration Platform"
+                }
+            },
+            "separator": "|"
+        },
+        "footer": {
+            "contact": {
+                "i18n": {
+                    "cn": "",
+                    "en": ""
+                }
+            },
+            "copyright": {
+                "i18n": {
+                    "cn": "",
+                    "en": ""
+                }
+            }
+        },
+        "validation_rules": {
+            "businessTopoInstNames": {
+                "value": base64.b64encode(b"^[^|/:*,<>\"?# ]*$").decode('utf-8'),
+                "i18n": {
+                    "cn": "格式不正确，不能包含特殊字符 | / : * , < > \" ? #及空格",
+                    "en": "Invalid format, cannot contain special characters | / : * , < > \" ? # or spaces"
+                }
+            }
+        },
+        "set": "空闲机池",
+        "idle_pool": {
+            "idle": "空闲机",
+            "fault": "故障机",
+            "recycle": "待回收",
+            "user_modules": []
+        }
+    }
+    return make_response(data=config)
+
+
+@user_bp.route('/admin/find/system_config/platform_setting/initial', methods=['GET'])
+@user_bp.route('/api/v3/admin/find/system_config/platform_setting/initial', methods=['GET'])
+@require_auth
+def get_default_config():
+    """获取默认的全局设置"""
+    import base64
+    
+    config = {
+        "backend": {
+            "max_biz_topo_level": 0,
+            "snapshot_biz_name": "蓝鲸"
+        },
+        "site": {
+            "name": {
+                "i18n": {
+                    "cn": "蓝鲸配置平台",
+                    "en": "BlueKing Configuration Platform"
+                }
+            },
+            "separator": "|"
+        },
+        "footer": {
+            "contact": {
+                "i18n": {
+                    "cn": "",
+                    "en": ""
+                }
+            },
+            "copyright": {
+                "i18n": {
+                    "cn": "",
+                    "en": ""
+                }
+            }
+        },
+        "validation_rules": {
+            "businessTopoInstNames": {
+                "value": base64.b64encode(b"^[^|/:*,<>\"?# ]*$").decode('utf-8'),
+                "i18n": {
+                    "cn": "格式不正确，不能包含特殊字符 | / : * , < > \" ? #及空格",
+                    "en": "Invalid format, cannot contain special characters | / : * , < > \" ? # or spaces"
+                }
+            }
+        },
+        "set": "空闲机池",
+        "idle_pool": {
+            "idle": "空闲机",
+            "fault": "故障机",
+            "recycle": "待回收",
+            "user_modules": []
+        }
+    }
+    return make_response(data=config)
+
+
+@user_bp.route('/api/v3/site/config', methods=['GET'])
+@user_bp.route('/site/config', methods=['GET'])
+def site_config():
+    """获取站点配置信息
+    
+    返回前端需要的站点配置信息，包括登录方式等。
+    
+    Response (JSON):
+        {
+            "result": true,
+            "code": 0,
+            "message": "success",
+            "data": {
+                "login": "skip-login" | "internal" | "",
+                "authscheme": "internal" | "iam",
+                "userManage": "http://localhost:8080/api/c/compapi/v2/usermanage/fs_list_users/"
+            }
+        }
+    """
+    login_version = "skip-login" if Config.SKIP_LOGIN else ""
+    
+    return make_response(data={
+        "login": login_version,
+        "authscheme": "internal",
+        "userManage": "/api/c/compapi/v2/usermanage/fs_list_users/"
+    })

@@ -1,0 +1,81 @@
+<!--
+ * Skip-Login Development Environment Entry
+ * This file is for development only, enabling skip-login mode for quick testing.
+ * Usage: Open this file instead of index.dev.html when SKIP_LOGIN is enabled in backend.
+-->
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="utf-8">
+    <title>CMDB Dev (Skip-Login)</title>
+    <script>
+      (function () {
+        if (window.location.protocol.startsWith('https')) {
+          var meta = document.createElement('meta')
+          meta.setAttribute('http-equiv', 'Content-Security-Policy')
+          meta.setAttribute('content', 'upgrade-insecure-requests')
+          document.head.appendChild(meta)
+        }
+      })();
+    </script>
+    <link rel="shortcut icon" href="/static/favicon.ico" type="image/x-icon">
+  </head>
+  <body>
+    <div id="app"></div>
+    <script type="text/javascript">
+        // 动态获取当前协议和端口
+        var protocol = window.location.protocol
+        var host = window.location.hostname
+        var port = window.location.port || (protocol === 'https:' ? '443' : '80')
+        var baseUrl = protocol + '//' + host + (port ? ':' + port : '')
+        
+        window.Site = {
+            url: baseUrl + "/proxy/",
+            version: "v3",
+            login: "skip-login",
+            agent: "",
+            authscheme: "internal",
+            buildVersion: "dev",
+            fullTextSearch: "off",
+            helpDocUrl: null,
+            disableOperationStatistic: false
+        }
+        window.User = {
+            admin: 1,
+            name: "admin"
+        }
+        window.Supplier = {
+            account: '0'
+        }
+        window.ESB = {
+          userManage: "http://localhost:8080/api/c/compapi/v2/usermanage/fs_list_users/"
+        }
+        window.API_HOST = baseUrl + "/proxy/"
+        window.API_PREFIX = API_HOST + 'api/' + Site.version
+
+        ;(async function() {
+          if (window.Site.login === 'skip-login') {
+            try {
+              const loginUrl = window.API_HOST + 'user/auth'
+              const response = await fetch(loginUrl, {
+                method: 'POST',
+                headers: {
+                  'Content-Type': 'application/json'
+                },
+                credentials: 'include'
+              })
+              const result = await response.json()
+              if (result.result && result.data) {
+                document.cookie = 'bk_token=' + result.data.bk_token + '; path=/; max-age=86400'
+                if (!window.User) window.User = {}
+                window.User.name = result.data.username
+                window.User.admin = 1
+              }
+            } catch (error) {
+              console.error('[Skip-Login] Auto login failed:', error)
+            }
+          }
+        })()
+    </script>
+  </body>
+</html>

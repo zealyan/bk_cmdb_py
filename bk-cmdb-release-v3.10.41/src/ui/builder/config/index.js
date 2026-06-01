@@ -35,7 +35,7 @@ process.CMDB_CONFIG = config
 const dev = {
   // custom config
   config: Object.assign({}, config, {
-    API_URL: JSON.stringify('http://localhost:9090/proxy/'),
+    API_URL: JSON.stringify('http://localhost:8080/proxy/'),
     API_VERSION: JSON.stringify('v3'),
     API_LOGIN: JSON.stringify(''),
     AGENT_URL: JSON.stringify(''),
@@ -53,66 +53,20 @@ const dev = {
   // Paths
   assetsSubDirectory: '',
   assetsPublicPath: '/static/',
-  // AI: 创建通用的代理事件处理函数，用于处理 OPTIONS 请求
-  // AI: 示例: 当浏览器发送跨域POST请求前，会先发送 OPTIONS 预检请求
-  onProxyRes(proxyRes, req, res) {
-    // AI: 为所有代理响应添加 CORS 响应头
-    res.setHeader('Access-Control-Allow-Origin', req.headers.origin || '*')
-    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS')
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, BK_User, HTTP_BLUEKING_SUPPLIER_ID, Cc_Request_Id')
-    res.setHeader('Access-Control-Allow-Credentials', 'true')
-  },
-  onProxyReq(proxyReq, req, res) {
-    // AI: 如果是 OPTIONS 请求，直接返回 200 而不转发到后端
-    if (req.method === 'OPTIONS') {
-      res.setHeader('Access-Control-Allow-Origin', req.headers.origin || '*')
-      res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS')
-      res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, BK_User, HTTP_BLUEKING_SUPPLIER_ID, Cc_Request_Id')
-      res.setHeader('Access-Control-Allow-Credentials', 'true')
-      res.writeHead(200)
-      res.end()
-      // AI: 中止原始请求，不再转发到后端
-      proxyReq.abort()
-    }
-  },
 
   proxyTable: {
-    '/proxy/user': {
-      logLevel: 'info',
-      changeOrigin: true,
-      target: 'http://192.168.45.141:8083/',
-      pathRewrite: {
-        '^/proxy/user': '/user'
-      }
-    },
-    '/proxy/logout': {
-      logLevel: 'info',
-      changeOrigin: true,
-      target: 'http://192.168.45.141:8083/',
-      pathRewrite: {
-        '^/proxy/logout': '/logout'
-      }
-    },
-    '/proxy/login': {
-      logLevel: 'info',
-      changeOrigin: true,
-      target: 'http://192.168.45.141:8083/',
-      pathRewrite: {
-        '^/proxy/login': '/login'
-      }
-    },
     '/proxy': {
-      logLevel: 'info',
+      logLevel: 'debug',
       changeOrigin: true,
-      target: 'http://192.168.45.141:8080/',
+      target: 'http://127.0.0.1:3000/',
       pathRewrite: {
         '^/proxy': ''
       }
     }
   },
   // Various Dev Server settings
-  host: 'localhost', // can be overwritten by process.env.HOST
-  port: 9090, // can be overwritten by process.env.PORT, if port is in use, a free one will be determined
+  host: '0.0.0.0', // can be overwritten by process.env.HOST
+  port: 8080, // can be overwritten by process.env.PORT, if port is in use, a free one will be determined
   autoOpenBrowser: true,
   errorOverlay: true,
   notifyOnErrors: true,

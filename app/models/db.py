@@ -3095,6 +3095,32 @@ INIT_DATA = {
             "metadata": {"label": {"bk_biz_id": "4"}}
         }
     ],
+    "cc_BizSet": [
+        {
+            "bk_biz_set_id": 1,
+            "bk_biz_set_name": "测试业务集1",
+            "bk_biz_ids": [2, 3],
+            "bk_supplier_account": "0",
+            "description": "这是一个测试业务集",
+            "bk_data_status": "enabled",
+            "creator": "admin",
+            "modifier": "admin",
+            "create_time": "2024-01-01 10:00:00",
+            "last_time": "2024-01-01 10:00:00"
+        },
+        {
+            "bk_biz_set_id": 2,
+            "bk_biz_set_name": "生产环境业务集",
+            "bk_biz_ids": [1, 2, 4],
+            "bk_supplier_account": "0",
+            "description": "生产环境使用的业务集",
+            "bk_data_status": "enabled",
+            "creator": "admin",
+            "modifier": "admin",
+            "create_time": "2024-01-02 11:00:00",
+            "last_time": "2024-01-02 11:00:00"
+        }
+    ],
     "cc_PlatBase": [
         {
             "bk_cloud_id": 0,
@@ -3122,6 +3148,11 @@ INIT_DATA = {
         {"username": "jelly", "password": hash_password("jelly123"), "display_name": "Jelly", "qq": "", "phone": "", "email": ""}
     ],
     "user_business": [
+        {"username": "admin", "bk_biz_id": 1},
+        {"username": "admin", "bk_biz_id": 2},
+        {"username": "admin", "bk_biz_id": 3},
+        {"username": "admin", "bk_biz_id": 4},
+        {"username": "admin", "bk_biz_id": 5},
         {"username": "tom", "bk_biz_id": 2},
         {"username": "tom", "bk_biz_id": 3},
         {"username": "tom", "bk_biz_id": 4},
@@ -3311,8 +3342,17 @@ def init_mock_data():
                     {"$set": doc}, 
                     upsert=True
                 )
+            elif collection == "user_business":
+                # 特殊处理user_business，用username和bk_biz_id组合查询
+                conn[collection].update_one(
+                    {"username": doc["username"], "bk_biz_id": doc["bk_biz_id"]},
+                    {"$set": doc}, 
+                    upsert=True
+                )
             elif "bk_module_id" in doc:
                 conn[collection].update_one({"bk_module_id": doc["bk_module_id"]}, {"$set": doc}, upsert=True)
+            elif "bk_biz_set_id" in doc:
+                conn[collection].update_one({"bk_biz_set_id": doc["bk_biz_set_id"]}, {"$set": doc}, upsert=True)
             elif "bk_set_id" in doc:
                 conn[collection].update_one({"bk_set_id": doc["bk_set_id"]}, {"$set": doc}, upsert=True)
             elif "bk_biz_id" in doc:
