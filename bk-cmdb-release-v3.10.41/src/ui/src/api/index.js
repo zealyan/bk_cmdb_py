@@ -29,7 +29,7 @@ const randomString = (length, chars) => {
 
 // axios实例
 const axiosInstance = Axios.create({
-  baseURL: window.API_PREFIX || 'http://localhost:9090/proxy/api/v3',
+  baseURL: window.API_PREFIX,
   xsrfCookieName: 'data_csrftoken',
   xsrfHeaderName: 'X-CSRFToken',
   withCredentials: true
@@ -43,10 +43,7 @@ axiosInstance.interceptors.request.use(
       // opentelementry TraceID
       traceparent: `00-${randomString(32, TRACE_CHARS)}-${randomString(16, TRACE_CHARS)}-01`,
       // 请求ID
-      Cc_Request_Id: `cc0000${xid.next()}`,
-      // 添加owner_id和user参数
-      HTTP_BLUEKING_SUPPLIER_ID: '0',
-      BK_User: 'admin'
+      Cc_Request_Id: `cc0000${xid.next()}`
     }
     return config
   },

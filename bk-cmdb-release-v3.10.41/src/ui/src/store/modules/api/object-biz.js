@@ -28,10 +28,7 @@ const getters = {
 
 const actions = {
   getAuthorizedBusiness({ commit, state }, config = {}) {
-    return $http.get('biz/with_reduced?sort=bk_biz_id', {
-      ...config,
-      transformData: false
-    })
+    return $http.get('biz/with_reduced?sort=bk_biz_id', config)
   },
   /**
      * 添加业务
@@ -127,7 +124,7 @@ const actions = {
      * @return {promises} promises 对象
      */
   searchBusiness({ commit, state, dispatch, rootGetters }, { params, config }) {
-    return $http.post('biz/search/web', params, config)
+    return $http.post(`${window.API_HOST}biz/search/web`, params, config)
   },
 
   searchBusinessById({ rootGetters }, { bizId, config }) {

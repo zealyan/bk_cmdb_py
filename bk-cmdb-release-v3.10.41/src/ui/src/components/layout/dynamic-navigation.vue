@@ -273,24 +273,15 @@
       },
       async refreshAuthorizedList() {
         try {
-          const response = await this.$store.dispatch('objectBiz/getAuthorizedBusiness')
-          if (response.result) {
-            const { info } = response
-            this.$store.commit('objectBiz/setAuthorizedBusiness', Object.freeze(info))
-            const { bizId } = this.$route.params
-            const exist = info.some(biz => biz.bk_biz_id.toString() === bizId.toString())
-            if (!exist) {
-              this.$route.matched[0].meta.view = 'permission'
-            }
-          } else {
-            console.error('获取授权业务失败:', response.bk_error_msg)
-            // 在internal模式下，即使获取授权失败，也设置一个空数组，避免后续操作出错
-            this.$store.commit('objectBiz/setAuthorizedBusiness', [])
+          const { info } = await this.$store.dispatch('objectBiz/getAuthorizedBusiness')
+          this.$store.commit('objectBiz/setAuthorizedBusiness', Object.freeze(info))
+          const { bizId } = this.$route.params
+          const exist = info.some(biz => biz.bk_biz_id.toString() === bizId.toString())
+          if (!exist) {
+            this.$route.matched[0].meta.view = 'permission'
           }
         } catch (error) {
-          console.error('获取授权业务异常:', error)
-          // 在internal模式下，即使获取授权异常，也设置一个空数组，避免后续操作出错
-          this.$store.commit('objectBiz/setAuthorizedBusiness', [])
+          console.error(error)
         }
       }
     }

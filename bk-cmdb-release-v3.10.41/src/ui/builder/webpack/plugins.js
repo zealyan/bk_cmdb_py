@@ -46,7 +46,7 @@ const getCommonPlugins = config => ([
 
   new HtmlWebpackPlugin({
     filename: 'index.html', // dest, relative output.path
-    template: isProd ? 'index.html' : 'index.dev.html',
+    template: 'index.html',
     config: modeValue(config.build.config, config.dev.config),
     templateParameters: modeValue(prodEnv, devEnv),
     excludeChunks: ['login'],
@@ -58,15 +58,6 @@ const getCommonPlugins = config => ([
     config: modeValue(config.build.config, config.dev.config),
     templateParameters: modeValue(prodEnv, devEnv),
     excludeChunks: ['app']
-  }),
-
-  new HtmlWebpackPlugin({
-    filename: 'index-skip-login.html',
-    template: 'index.skip-login.html',
-    config: modeValue(config.build.config, config.dev.config),
-    templateParameters: modeValue(prodEnv, devEnv),
-    excludeChunks: ['login'],
-    minify: false
   }),
 
   new CopyPlugin({

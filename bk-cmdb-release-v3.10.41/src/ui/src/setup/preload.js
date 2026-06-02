@@ -99,18 +99,10 @@ export default async function (app) {
   }
 
   // 获取有访问权限的业务
-  try {
-    getAuthorizedBusiness()
-  } catch (error) {
-    console.error('获取授权业务异常:', error)
-  }
+  getAuthorizedBusiness()
 
   // 获取有访问权限的业务集
-  try {
-    getAuthorizedBusinessSet()
-  } catch (error) {
-    console.error('获取授权业务集异常:', error)
-  }
+  getAuthorizedBusinessSet()
 
   getMainLineModels()
 

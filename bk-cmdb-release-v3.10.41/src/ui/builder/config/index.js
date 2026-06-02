@@ -35,7 +35,7 @@ process.CMDB_CONFIG = config
 const dev = {
   // custom config
   config: Object.assign({}, config, {
-    API_URL: JSON.stringify('http://localhost:8080/proxy/'),
+    API_URL: JSON.stringify('http://{host}:{port}/proxy/'),
     API_VERSION: JSON.stringify('v3'),
     API_LOGIN: JSON.stringify(''),
     AGENT_URL: JSON.stringify(''),
@@ -53,20 +53,19 @@ const dev = {
   // Paths
   assetsSubDirectory: '',
   assetsPublicPath: '/static/',
-
   proxyTable: {
     '/proxy': {
-      logLevel: 'debug',
+      logLevel: 'info',
       changeOrigin: true,
-      target: 'http://127.0.0.1:3000/',
+      target: 'http://{webserver地址}/',
       pathRewrite: {
         '^/proxy': ''
       }
     }
   },
   // Various Dev Server settings
-  host: '0.0.0.0', // can be overwritten by process.env.HOST
-  port: 8080, // can be overwritten by process.env.PORT, if port is in use, a free one will be determined
+  host: 'localhost', // can be overwritten by process.env.HOST
+  port: 9090, // can be overwritten by process.env.PORT, if port is in use, a free one will be determined
   autoOpenBrowser: true,
   errorOverlay: true,
   notifyOnErrors: true,

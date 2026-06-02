@@ -2,42 +2,38 @@
 
 ## 依赖第三方组件
 
-- ZooKeeper >= 3.4.11
-- Redis   >= 3.2.11
-- MongoDB >= 4.2
-- Elasticsearch >= 7.0.0 (用于全文检索功能)
-- Monstache >= 6.0.0 (用于全文检索功能)
+* ZooKeeper >= 3.4.11
+* Redis   >= 3.2.11
+* MongoDB >= 4.2
+* Elasticsearch >= 7.0.0 (用于全文检索功能)
+* Monstache >= 6.0.0 (用于全文检索功能)
 
 ## CMDB 微服务进程清单
 
 ### 1. web层服务进程
-
-- cmdb\_webserver
+* cmdb_webserver
 
 ### 2. 服务网关进程
+* cmdb_apiserver
 
-- cmdb\_apiserver
 
 ### 3. 场景层服务进程
-
-- cmdb\_adminserver
-- cmdb\_eventserver
-- cmdb\_hostserver
-- cmdb\_procserver
-- cmdb\_toposerver
-- cmdb\_datacollection
-- cmdb\_operationserver
-- cmdb\_synchronizeserver
-- cmdb\_taskserver
+* cmdb_adminserver
+* cmdb_eventserver
+* cmdb_hostserver
+* cmdb_procserver
+* cmdb_toposerver
+* cmdb_datacollection
+* cmdb_operationserver
+* cmdb_synchronizeserver
+* cmdb_taskserver
 
 ### 4. 资源管理服务进程
+* cmdb_coreservice
 
-- cmdb\_coreservice
-
-***
+---
 
 ## 部署介绍
-
 ### 1. 部署ZooKeeper
 
 请参看官方资料 [ZooKeeper](https://zookeeper.apache.org/doc/current/zookeeperAdmin.html#ch_deployment)
@@ -49,6 +45,7 @@
 请参看官方资料 [Redis](https://redis.io/download)
 
 推荐版本下载： [Redis 3.2.11](http://download.redis.io/releases/redis-3.2.11.tar.gz)
+
 
 ### 3. 部署MongoDB
 
@@ -65,38 +62,27 @@
 #### 1. Redis需要打开auth认证的功能，并为其配置密码
 
 ##### a. 修改配置文件
-
 redis的配置文件默认在/etc/redis.conf，找到如下行：
-
-```json
+``` json
 #requirepass foobared
-```
-
+``` 
 去掉前面的注释，并修改为所需要的密码：
-
-```json
+``` json
  requirepass myPassword （其中myPassword就是要设置的密码）
-```
-
+``` 
 ##### b. 重启Redis
-
 如果Redis已经配置为service服务，可以通过以下方式重启：
-
 ```json
 service redis restart
 ```
-
 ##### c. 登录验证
-
 设置Redis认证密码后，客户端登录时需要使用-a参数输入认证密码,举例如下：
-
 ```json
 $ ./redis-cli -h 127.0.0.1 -p 6379 -a myPassword
 127.0.0.1:6379> config get requirepass
 1) "requirepass"
 2) "myPassword"
 ```
-
 看到类似上面的输出，说明Reids密码认证配置成功。
 
 #### 2. 安装MongoDB后，配置集群，创建数据库 cmdb
@@ -110,7 +96,6 @@ mongodb以集群的方式启动，需加入参数--replSet,如--replSet=rs0
 进入mongodb后，在members中配置集群ip和端口
 
 如: 配置集群中只有单台机器
-
 ```json
  >rs.initiate({ _id : "rs0",members: [{ _id: 0, host: "ip:port" }]})
 ```
@@ -119,16 +104,13 @@ mongodb以集群的方式启动，需加入参数--replSet,如--replSet=rs0
 
 接下来登陆MongoDB后，根据需求执行以下命令:
 
-- 未开启ES情况(用于全文检索, 可选, 控制开关见第9步的full\_text\_search)
-
-```json
+- 未开启ES情况(用于全文检索, 可选, 控制开关见第9步的full_text_search)
+``` json
  > use cmdb
  > db.createUser({user: "cc",pwd: "cc",roles: [ { role: "readWrite", db: "cmdb" } ]})
 ```
-
-- 开启ES情况(用于全文检索, 可选, 控制开关见第9步的full\_text\_search)
-
-```json
+- 开启ES情况(用于全文检索, 可选, 控制开关见第9步的full_text_search)
+``` json
  > use cmdb
  > db.createUser({user: "cc",pwd: "cc",roles: [ { role: "readWrite", db: "cmdb" },{ role: "readWrite", db: "monstache" } ]})
 ```
@@ -137,21 +119,20 @@ mongodb以集群的方式启动，需加入参数--replSet,如--replSet=rs0
 
 详细手册请参考官方资料 [MongoDB](https://docs.mongodb.com/manual/reference/method/db.createUser/)
 
-### 6. 部署Elasticsearch (用于全文检索, 可选, 控制开关见第9步的full\_text\_search)
+### 6. 部署Elasticsearch (用于全文检索, 可选, 控制开关见第9步的full_text_search)
 
 官方下载 [ElasticSearch](https://www.elastic.co/cn/downloads/past-releases)
 搜索7.x的版本下载，推荐下载7.0.0
 下载后解压即可，解压后找到配置文件config/elasticsearch.yml，可以配置指定network.host为
 具体的host的地址
 然后到目录的bin目录下运行(注意，不能使用root权限运行，**要普通用户**)：
-
 ```shell
 ./elasticsearch
 ```
 
 如果想部署高可用可扩展的ES，可参考官方文档[ES-Guide](https://www.elastic.co/guide/index.html)
 
-### 7.  部署Monstache (用于全文检索, 可选, 控制开关见第9步的full\_text\_search)
+### 7.  部署Monstache (用于全文检索, 可选, 控制开关见第9步的full_text_search)
 
 蓝鲸CMDB针对需求场景采用定制化的Monstache组件，组件以及其插件SO请从指定的Release Package中获取。
 
@@ -165,7 +146,7 @@ mongodb以集群的方式启动，需加入参数--replSet,如--replSet=rs0
 
 在目标机上解压包解**cmdb.tar.gz**，解压后根目录结构如下：
 
-```shell
+``` shell
 drwxr-xr-x 5 root root  4096 Jun 18 15:24 cmdb_adminserver
 drwxr-xr-x 4 root root  4096 Jun 18 15:24 cmdb_apiserver
 drwxr-xr-x 4 root root  4096 Jun 18 15:24 cmdb_coreservice
@@ -193,31 +174,31 @@ drwxr-xr-x 7 root root  4096 Jun 18 10:33 web
 
 各目录代表的服务及职责：
 
-| 目标                      | 类型         | 用途描述                                        |
-| ----------------------- | ---------- | ------------------------------------------- |
-| cmdb\_adminserver       | server     | 负责系统数据的初始化以及配置管理工作                          |
-| cmdb\_apiserver         | server     | 场景层服务，api 服务                                |
-| cmdb\_coreservice       | server     | 资源管理层，提供原子接口服务                              |
-| cmdb\_datacollection    | server     | 场景层服务，数据采集服务                                |
-| cmdb\_eventserver       | server     | 场景层服务，事件推送服务                                |
-| cmdb\_hostserver        | server     | 场景层服务，主机数据维护                                |
-| cmdb\_operationserver   | server     | 场景层服务，提供与运营统计相关功能服务                         |
-| cmdb\_procserver        | server     | 场景层服务，负责进程数据的维护                             |
-| cmdb\_synchronizeserver | server     | 场景层服务，数据同步服务                                |
-| cmdb\_taskserver        | server     | 场景层服务，异步任务管理服务                              |
-| cmdb\_toposerver        | server     | 场景层服务，负责模型的定义以及主机、业务、模块及进程等实例数据的维护          |
-| cmdb\_webserver         | server     | web server 服务子目录                            |
-| docker                  | Dockerfile | 各服务的Dockerfile模板                            |
-| image.sh                | script     | 用于制作Docker镜像                                |
-| init.py                 | script     | 用于初始化服务及配置项，在需要重置服务配置的时候也可以运行此脚本，按照提示输入配置参数 |
-| init\_db.sh             | script     | 初始化数据库的数据                                   |
-| ip.py                   | script     | 查询主机真实的IP脚本                                 |
-| restart.sh              | script     | 用于重启所有服务                                    |
-| start.sh                | script     | 用于启动所有服务                                    |
-| stop.sh                 | script     | 用于停止所有服务                                    |
-| tool\_ctl               | ctl        | 管理小工具                                       |
-| upgrade.sh              | script     | 用于全量升级服务进程                                  |
-| web                     | ui         | CMDB UI 页面                                  |
+| 目标                   | 类型       | 用途描述                                                                               |
+| ---------------------- | ---------- | -------------------------------------------------------------------------------------- |
+| cmdb_adminserver       | server     | 负责系统数据的初始化以及配置管理工作                                                   |
+| cmdb_apiserver         | server     | 场景层服务，api 服务                                                                   |
+| cmdb_coreservice       | server     | 资源管理层，提供原子接口服务                                                           |
+| cmdb_datacollection    | server     | 场景层服务，数据采集服务                                                               |
+| cmdb_eventserver       | server     | 场景层服务，事件推送服务                                                               |
+| cmdb_hostserver        | server     | 场景层服务，主机数据维护                                                               |
+| cmdb_operationserver   | server     | 场景层服务，提供与运营统计相关功能服务                                                 |
+| cmdb_procserver        | server     | 场景层服务，负责进程数据的维护                                                         |
+| cmdb_synchronizeserver | server     | 场景层服务，数据同步服务                                                               |
+| cmdb_taskserver        | server     | 场景层服务，异步任务管理服务                                                           |
+| cmdb_toposerver        | server     | 场景层服务，负责模型的定义以及主机、业务、模块及进程等实例数据的维护                   |
+| cmdb_webserver         | server     | web server 服务子目录                                                                  |
+| docker                 | Dockerfile | 各服务的Dockerfile模板                                                                 |
+| image.sh               | script     | 用于制作Docker镜像                                                                     |
+| init.py                | script     | 用于初始化服务及配置项，在需要重置服务配置的时候也可以运行此脚本，按照提示输入配置参数 |
+| init_db.sh             | script     | 初始化数据库的数据                                                                     |
+| ip.py                  | script     | 查询主机真实的IP脚本                                                                   |
+| restart.sh             | script     | 用于重启所有服务                                                                       |
+| start.sh               | script     | 用于启动所有服务                                                                       |
+| stop.sh                | script     | 用于停止所有服务                                                                       |
+| tool_ctl               | ctl        | 管理小工具                                                                             |
+| upgrade.sh             | script     | 用于全量升级服务进程                                                                   |
+| web                    | ui         | CMDB UI 页面                                                                           |
 
 ### 9. 初始化
 
@@ -225,7 +206,7 @@ drwxr-xr-x 7 root root  4096 Jun 18 10:33 web
 
 进入安装目录并执行初始化脚本，**按照提示输入参数**。
 
-```shell
+``` shell
 [root@SWEBVM000229 /data/cmdb]# python init.py
 
 	usage:
@@ -248,38 +229,37 @@ drwxr-xr-x 7 root root  4096 Jun 18 10:33 web
 
 **init.py 参数详解：**
 
-| ZooKeeper地址           | 用途说明                                                                                                                         | 必填                  | 默认值                       | <br /> |
-| --------------------- | ---------------------------------------------------------------------------------------------------------------------------- | ------------------- | ------------------------- | :----- |
-| --discovery           | 服务发现组件，ZooKeeper 服务地址                                                                                                        | 是                   | 无                         | <br /> |
-| --database            | 数据库名字                                                                                                                        | mongodb 中数据库名       | 否                         | cmdb   |
-| --redis\_ip           | Redis监听的IP                                                                                                                   | 是                   | 无                         | <br /> |
-| --redis\_port         | Redis监听的端口                                                                                                                   | 否                   | 6379                      | <br /> |
-| --redis\_pass         | Redis登陆密码                                                                                                                    | 是                   | 无                         | <br /> |
-| --mongo\_ip           | MongoDB服务监听的IP                                                                                                               | 是                   | 无                         | <br /> |
-| --mongo\_port         | MongoDB端口                                                                                                                    | 否                   | 27017                     | <br /> |
-| --mongo\_user         | MongoDB中CMDB数据库用户名                                                                                                           | 是                   | 无                         | <br /> |
-| --mongo\_pass         | MongoDB中CMDB数据库用户名密码                                                                                                         | 是                   | 无                         | <br /> |
-| --blueking\_cmdb\_url | 该值表示部署完成后,输入到浏览器中访问的cmdb 网址, 格式: <http://xx.xxx.com:80>, 用户自定义填写;在没有配置 DNS 解析的情况下, 填写服务器的 IP:PORT。端口为当前cmdb\_webserver监听的端口。 | 是                   | 无                         | <br /> |
-| --blueking\_paas\_url | 蓝鲸PAAS 平台的地址，对于独立部署的CC版本可以不配置                                                                                                | 否                   | 无                         | <br /> |
-| --listen\_port        | cmdb\_webserver服务监听的端口，默认是8083                                                                                               | 是                   | 8083                      | <br /> |
-| --full\_text\_search  | 全文检索功能开关(取值：off/on)，默认是off，开启是on                                                                                             | 否                   | off                       | <br /> |
-| --es\_url             | elasticsearch服务监听url，默认是<http://127.0.0.1:9200>                                                                              | 否                   | <http://127.0.0.1:9200>   | <br /> |
-| --auth\_scheme        | 权限模式，web页面使用，可选值: internal, iam                                                                                              | 否                   | internal                  | <br /> |
-| --auth\_enabled       | 是否采用蓝鲸权限中心鉴权                                                                                                                 | 否                   | false                     | <br /> |
-| --auth\_address       | 蓝鲸权限中心地址                                                                                                                     | auth\_enabled 为真时必填 | <https://iam.domain.com/> | <br /> |
-| --auth\_app\_code     | cmdb项目在蓝鲸权限中心的应用编码                                                                                                           | auth\_enabled 为真时必填 | bk\_cmdb                  | <br /> |
-| --auth\_app\_secret   | cmdb项目在蓝鲸权限中心的应用密钥                                                                                                           | auth\_enabled 为真时必填 | xxxxxxx                   | <br /> |
-| --log\_level          | 日志级别0-9, 9日志最详细                                                                                                              | 否                   | 3                         | <br /> |
-| --register\_ip        | 进程注册到zookeeper上的IP地址，可以是域名                                                                                                   | 否                   | 无                         | <br /> |
-| --user\_info          | 登陆 web 页面的账号密码                                                                                                               | 否                   | 无                         | <br /> |
+| ZooKeeper地址       | 用途说明                                                                                                                                                                             | 必填                    | 默认值                  |
+| ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ----------------------- | ----------------------- |
+| --discovery         | 服务发现组件，ZooKeeper 服务地址                                                                                                                                                     | 是                      | 无                      |
+| --database          | 数据库名字                                                                                                                                                                           | mongodb 中数据库名      | 否                      | cmdb |
+| --redis_ip          | Redis监听的IP                                                                                                                                                                        | 是                      | 无                      |
+| --redis_port        | Redis监听的端口                                                                                                                                                                      | 否                      | 6379                    |
+| --redis_pass        | Redis登陆密码                                                                                                                                                                        | 是                      | 无                      |
+| --mongo_ip          | MongoDB服务监听的IP                                                                                                                                                                  | 是                      | 无                      |
+| --mongo_port        | MongoDB端口                                                                                                                                                                          | 否                      | 27017                   |
+| --mongo_user        | MongoDB中CMDB数据库用户名                                                                                                                                                            | 是                      | 无                      |
+| --mongo_pass        | MongoDB中CMDB数据库用户名密码                                                                                                                                                        | 是                      | 无                      |
+| --blueking_cmdb_url | 该值表示部署完成后,输入到浏览器中访问的cmdb 网址, 格式: http://xx.xxx.com:80, 用户自定义填写;在没有配置 DNS 解析的情况下, 填写服务器的 IP:PORT。端口为当前cmdb_webserver监听的端口。 | 是                      | 无                      |
+| --blueking_paas_url | 蓝鲸PAAS 平台的地址，对于独立部署的CC版本可以不配置                                                                                                                                  | 否                      | 无                      |
+| --listen_port       | cmdb_webserver服务监听的端口，默认是8083                                                                                                                                             | 是                      | 8083                    |
+| --full_text_search  | 全文检索功能开关(取值：off/on)，默认是off，开启是on                                                                                                                                  | 否                      | off                     |
+| --es_url            | elasticsearch服务监听url，默认是http://127.0.0.1:9200                                                                                                                                | 否                      | http://127.0.0.1:9200   |
+| --auth_scheme       | 权限模式，web页面使用，可选值: internal, iam                                                                                                                                         | 否                      | internal                |
+| --auth_enabled      | 是否采用蓝鲸权限中心鉴权                                                                                                                                                             | 否                      | false                   |
+| --auth_address      | 蓝鲸权限中心地址                                                                                                                                                                     | auth_enabled 为真时必填 | https://iam.domain.com/ |
+| --auth_app_code     | cmdb项目在蓝鲸权限中心的应用编码                                                                                                                                                     | auth_enabled 为真时必填 | bk_cmdb                 |
+| --auth_app_secret   | cmdb项目在蓝鲸权限中心的应用密钥                                                                                                                                                     | auth_enabled 为真时必填 | xxxxxxx                 |
+| --log_level         | 日志级别0-9, 9日志最详细                                                                                                                                                             | 否                      | 3                       |
+| --register_ip       | 进程注册到zookeeper上的IP地址，可以是域名                                                                                                                                            | 否                      | 无                      |
+| --user_info         | 登陆 web 页面的账号密码                                                                                                                                                              | 否                      | 无                      |
 
 **注:init.py 执行成功后会自动生成cmdb各服务进程所需要的配置。**
 
 **示例(示例中的参数需要用真实的值替换)：**
 
-如果部署了用于全文检索的第6和第7步，如要开启全文检索功能把full\_text\_search的值置为on
-
-```shell
+如果部署了用于全文检索的第6和第7步，如要开启全文检索功能把full_text_search的值置为on
+``` shell
 python init.py  \
   --discovery          127.0.0.1:2181 \
   --database           cmdb \
@@ -307,23 +287,23 @@ python init.py  \
 
 ### 10. init.py 生成的配置如下
 
-配置文件的存储路径：{安装目录}/cmdb\_adminserver/configures/
+配置文件的存储路径：{安装目录}/cmdb_adminserver/configures/
 
-```shell
+``` shell
 -rw-r--r-- 1 root root 873 Jun 18 17:25 common.yaml
 -rw-r--r-- 1 root root   0 Jun 18 15:20 extra.yaml
 -rw-r--r-- 1 root root 580 Jun 18 15:20 migrate.yaml
 -rw-r--r-- 1 root root 155 Jun 18 15:20 mongodb.yaml
 -rw-r--r-- 1 root root 321 Jun 18 15:20 redis.yaml
-```
+``` 
 
-配置文件目录：{安装目录}/cmdb\_adminserver/configures
+配置文件目录：{安装目录}/cmdb_adminserver/configures
 
 **注：由于MongoDB 从3.6开始更改了默认加密方式，所以如果安装的MongoDB的版本大于等于3.6，需要手动将以上配置文件中MongoDB的配置项中增加 mechanism=SCRAM-SHA-1**
 
 > 配置文件mongodb小节增加mechanism 配置项示例如下
 
-```toml
+``` toml
 [mongodb]
 host=127.0.0.1
 usr=cc
@@ -335,13 +315,13 @@ maxIDleConns=1000
 mechanism=SCRAM-SHA-1
 ```
 
-***
+---
 
 ## 运行效果
 
 ### 1. 启动服务
 
-```shell
+``` shell
 [root@SWEBVM000229 /data/cmdb]#  ./start.sh 
 starting: cmdb_adminserver
 starting: cmdb_apiserver
@@ -368,27 +348,30 @@ root       937     1  0 08:27 pts/0    00:00:00 ./cmdb_webserver --addrport=127.
 process count should be: 11 , now: 11
 ```
 
-**注：此处cmdb\_test仅用作效果展示，非有效进程。**
+**注：此处cmdb_test仅用作效果展示，非有效进程。**
+
 
 ### 2. 服务启动之后初始化数据库
 
-```shell
+``` shell
 [root@SWEBVM000229 /data/cmdb]# bash ./init_db.sh
 {"result":true,"bk_error_code":0,"bk_error_msg":"success","data":"migrate success"}
 ```
-
 **注：以上输出表示初始化数据库成功，此步骤必需要所有cmdb进程成功启动后执行。**
+
+
 
 ### 3. 系统运行页面
 
-**打开浏览器:** 数据cmdb\_webserver 监听的地址，如本文档中示例服务监听的地址: <http://127.0.0.1:8083>
+**打开浏览器:** 数据cmdb_webserver 监听的地址，如本文档中示例服务监听的地址: http://127.0.0.1:8083
 
-!\[image]\(../resource/img/page.png null)
+![image](../resource/img/page.png)
+
+
 
 ### 4. 停止服务
 
-```shell
+``` shell
 [root@SWEBVM000229 /data/cmdb]# ./stop.sh
 Running process count: 0
 ```
-

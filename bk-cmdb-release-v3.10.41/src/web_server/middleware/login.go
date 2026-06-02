@@ -40,19 +40,6 @@ var CacheCli redis.Client
 func ValidLogin(config options.Config, disc discovery.DiscoveryInterface) gin.HandlerFunc {
 
 	return func(c *gin.Context) {
-		// AI: 处理 CORS 预检请求
-		// AI: 示例: 当浏览器发送跨域POST请求到 /logout 时，会先发送 OPTIONS 预检请求
-		if c.Request.Method == "OPTIONS" {
-			// AI: 设置 CORS 响应头，允许跨域请求
-			c.Header("Access-Control-Allow-Origin", c.Request.Header.Get("Origin"))
-			c.Header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-			c.Header("Access-Control-Allow-Headers", "Content-Type, Authorization, BK_User, HTTP_BLUEKING_SUPPLIER_ID, Cc_Request_Id")
-			c.Header("Access-Control-Allow-Credentials", "true")
-			c.Status(200)
-			c.Abort()
-			return
-		}
-
 		rid := util.GetHTTPCCRequestID(c.Request.Header)
 		pathArr := strings.Split(c.Request.URL.Path, "/")
 		path1 := pathArr[1]
@@ -61,7 +48,7 @@ func ValidLogin(config options.Config, disc discovery.DiscoveryInterface) gin.Ha
 		c.Request.Header.Del("Accept-Encoding")
 
 		switch path1 {
-		case "healthz", "metrics", "login", "logout", "static":
+		case "healthz", "metrics", "login", "static":
 			c.Next()
 			return
 		}

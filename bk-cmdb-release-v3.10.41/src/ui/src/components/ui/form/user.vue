@@ -99,19 +99,21 @@
       focus() {
         this.$refs.userSelector.focus()
       },
-      async fuzzySearchMethod(_keyword) {
-        try {
-          // AI: 直接返回空结果，避免CORS错误
-          return {
-            next: false,
-            results: []
+      async fuzzySearchMethod(keyword) {
+        const users = await this.$http.get(`${window.API_HOST}user/list`, {
+          params: {
+            fuzzy_lookups: keyword
+          },
+          config: {
+            cancelPrevious: true
           }
-        } catch (error) {
-          // AI: 当API不存在时，返回空结果
-          return {
-            next: false,
-            results: []
-          }
+        })
+        return {
+          next: false,
+          results: users.map(user => ({
+            username: user.english_name,
+            display_name: user.chinese_name
+          }))
         }
       },
       exactSearchMethod(usernames) {

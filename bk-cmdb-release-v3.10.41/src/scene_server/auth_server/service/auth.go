@@ -17,7 +17,6 @@ import (
 
 	"configcenter/src/ac/iam"
 	"configcenter/src/ac/meta"
-	"configcenter/src/common/auth"
 	"configcenter/src/common/blog"
 	"configcenter/src/common/http/rest"
 	"configcenter/src/common/metadata"
@@ -31,16 +30,6 @@ func (s *AuthService) AuthorizeBatch(ctx *rest.Contexts) {
 	err := ctx.DecodeInto(opts)
 	if err != nil {
 		ctx.RespAutoError(err)
-		return
-	}
-
-	// If auth is disabled, all requests are authorized
-	if !auth.EnableAuthorize() {
-		decisions := make([]bool, len(opts.Batch))
-		for i := range decisions {
-			decisions[i] = true
-		}
-		ctx.RespEntity(decisions)
 		return
 	}
 
@@ -64,16 +53,6 @@ func (s *AuthService) AuthorizeAnyBatch(ctx *rest.Contexts) {
 
 	blog.InfoJSON("-> authorize any request: %s, rid: %s", opts, ctx.Kit.Rid)
 
-	// If auth is disabled, all requests are authorized
-	if !auth.EnableAuthorize() {
-		decisions := make([]bool, len(opts.Batch))
-		for i := range decisions {
-			decisions[i] = true
-		}
-		ctx.RespEntity(decisions)
-		return
-	}
-
 	decisions, err := s.authorizer.AuthorizeAnyBatch(ctx.Kit.Ctx, opts)
 	if err != nil {
 		blog.ErrorJSON("authorize any batch failed, err: %s, ops: %s, rid: %s", err, opts, ctx.Kit.Rid)
@@ -89,16 +68,6 @@ func (s *AuthService) ListAuthorizedResources(ctx *rest.Contexts) {
 	err := ctx.DecodeInto(input)
 	if err != nil {
 		ctx.RespAutoError(err)
-		return
-	}
-
-	// If auth is disabled, all resources are authorized
-	if !auth.EnableAuthorize() {
-		authorizeList := types.AuthorizeList{
-			IsAny: true,
-			Ids:   []string{},
-		}
-		ctx.RespEntity(authorizeList)
 		return
 	}
 
@@ -158,12 +127,6 @@ func (s *AuthService) GetNoAuthSkipUrl(ctx *rest.Contexts) {
 		return
 	}
 
-	// If auth is disabled, return empty url
-	if !auth.EnableAuthorize() {
-		ctx.RespEntity("")
-		return
-	}
-
 	url, err := esb.EsbClient().IamSrv().GetNoAuthSkipUrl(ctx.Kit.Ctx, ctx.Kit.Header, *input)
 	if err != nil {
 		blog.ErrorJSON("GetNoAuthSkipUrl failed, err: %s, input: %s, rid: %s", err, input, ctx.Kit.Rid)
@@ -181,12 +144,6 @@ func (s *AuthService) GetPermissionToApply(ctx *rest.Contexts) {
 	err := ctx.DecodeInto(&input)
 	if err != nil {
 		ctx.RespAutoError(err)
-		return
-	}
-
-	// If auth is disabled, return empty permission
-	if !auth.EnableAuthorize() {
-		ctx.RespEntity(metadata.IamPermission{})
 		return
 	}
 
@@ -209,13 +166,6 @@ func (s *AuthService) RegisterResourceCreatorAction(ctx *rest.Contexts) {
 		ctx.RespAutoError(err)
 		return
 	}
-
-	// If auth is disabled, return empty policies
-	if !auth.EnableAuthorize() {
-		ctx.RespEntity([]interface{}{})
-		return
-	}
-
 	input.System = iam.SystemIDCMDB
 
 	policies, err := esb.EsbClient().IamSrv().RegisterResourceCreatorAction(ctx.Kit.Ctx, ctx.Kit.Header, *input)
@@ -236,13 +186,6 @@ func (s *AuthService) BatchRegisterResourceCreatorAction(ctx *rest.Contexts) {
 		ctx.RespAutoError(err)
 		return
 	}
-
-	// If auth is disabled, return empty policies
-	if !auth.EnableAuthorize() {
-		ctx.RespEntity([]interface{}{})
-		return
-	}
-
 	input.System = iam.SystemIDCMDB
 
 	policies, err := esb.EsbClient().IamSrv().BatchRegisterResourceCreatorAction(ctx.Kit.Ctx, ctx.Kit.Header, *input)

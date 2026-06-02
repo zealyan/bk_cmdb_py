@@ -23,35 +23,15 @@ const requestId = Symbol('getAuthorizedBusiness')
 
 let committed = false
 export async function getAuthorizedBusiness() {
-  try {
-    const response = await store.dispatch('objectBiz/getAuthorizedBusiness', {
-      requestId,
-      fromCache: true
-    })
-    if (response.result) {
-      const { info } = response
-      if (!committed) {
-        store.commit('objectBiz/setAuthorizedBusiness', Object.freeze(info))
-        committed = true
-      }
-      return info
-    }
-    console.error('获取授权业务失败:', response.bk_error_msg)
-    // 在internal模式下，即使获取授权失败，也返回一个空数组，避免后续操作出错
-    if (!committed) {
-      store.commit('objectBiz/setAuthorizedBusiness', [])
-      committed = true
-    }
-    return []
-  } catch (error) {
-    console.error('获取授权业务异常:', error)
-    // 在internal模式下，即使获取授权异常，也返回一个空数组，避免后续操作出错
-    if (!committed) {
-      store.commit('objectBiz/setAuthorizedBusiness', [])
-      committed = true
-    }
-    return []
+  const { info } = await store.dispatch('objectBiz/getAuthorizedBusiness', {
+    requestId,
+    fromCache: true
+  })
+  if (!committed) {
+    store.commit('objectBiz/setAuthorizedBusiness', Object.freeze(info))
+    committed = true
   }
+  return info
 }
 
 export const getAuthorizedBusinessSet = async () => businessSetService.getAuthorizedWithCache()

@@ -14,7 +14,6 @@ const path = require('path')
 
 const { HOST } = process.env
 const PORT = process.env.PORT && Number(process.env.PORT)
-const SKIP_LOGIN = process.env.SKIP_LOGIN === 'true'
 
 module.exports = config => ({
   before(app) {
@@ -24,7 +23,7 @@ module.exports = config => ({
   clientLogLevel: 'error',
   historyApiFallback: {
     rewrites: [
-      { from: /.*/, to: path.posix.join(config.dev.assetsPublicPath, SKIP_LOGIN ? 'index-skip-login.html' : 'index.html') },
+      { from: /.*/, to: path.posix.join(config.dev.assetsPublicPath, 'index.html') },
     ],
   },
   hot: true, // Enabling HMR
@@ -37,16 +36,7 @@ module.exports = config => ({
     ? { warnings: false, errors: true }
     : false,
   publicPath: config.dev.assetsPublicPath,
-  // AI: 配置代理，并添加 CORS 处理函数
-  proxy: Object.keys(config.dev.proxyTable).reduce((proxy, key) => {
-    proxy[key] = {
-      ...config.dev.proxyTable[key],
-      // AI: 为每个代理配置添加 onProxyReq 和 onProxyRes 回调
-      onProxyReq: config.dev.onProxyReq,
-      onProxyRes: config.dev.onProxyRes
-    }
-    return proxy
-  }, {}),
+  proxy: config.dev.proxyTable,
   quiet: false, // necessary for FriendlyErrorsPlugin
   watchOptions: {
     poll: config.dev.poll,
