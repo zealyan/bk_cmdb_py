@@ -20,17 +20,17 @@ wheels/
 .installed.cfg
 *.egg
 
-# bk-cmdb
-bk-cmdb-release-v3.10.41/src/bin/*
-bk-cmdb-release-v3.10.41/src/*/*/cmdb_*
-bk-cmdb-release-v3.10.41/src/apiserver/*apiserver
-bk-cmdb-release-v3.10.41/src/apiserver/cmdb_*
-bk-cmdb-release-v3.10.41/src/scene_server/*/*server
-bk-cmdb-release-v3.10.41/src/scene_server/*/*collection
-bk-cmdb-release-v3.10.41/src/source_controller/*/*controller
-bk-cmdb-release-v3.10.41/src/source_controller/*/coreservice
-bk-cmdb-release-v3.10.41/src/web*/*server
-bk-cmdb-release-v3.10.41/src/web*/cmdb_*
+# bk-cmdb（构建产物，按版本通配忽略 v3.10.41 / v3.10.50）
+bk-cmdb-release-v3.10.*/src/bin/*
+bk-cmdb-release-v3.10.*/src/*/*/cmdb_*
+bk-cmdb-release-v3.10.*/src/apiserver/*apiserver
+bk-cmdb-release-v3.10.*/src/apiserver/cmdb_*
+bk-cmdb-release-v3.10.*/src/scene_server/*/*server
+bk-cmdb-release-v3.10.*/src/scene_server/*/*collection
+bk-cmdb-release-v3.10.*/src/source_controller/*/*controller
+bk-cmdb-release-v3.10.*/src/source_controller/*/coreservice
+bk-cmdb-release-v3.10.*/src/web*/*server
+bk-cmdb-release-v3.10.*/src/web*/cmdb_*
 
 # Nodejs
 */node_modules/
