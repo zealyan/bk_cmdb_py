@@ -1,6 +1,17 @@
-# bk-cmdb v3.10.41 开发环境搭建 SOP
+# bk-cmdb 开发环境搭建 SOP（v3.10.41 / v3.10.50）
 
-## 1\. 下载解压源码
+> 本文档原以 **v3.10.41** 编写；当前 `bk_cmdb_py` 仓库内实际内置的是 **v3.10.50** 源码（`bk-cmdb-release-v3.10.50/`）。二者构建流程一致，差异仅集中在「源码来源」与「UI 依赖补丁」两处，详见末尾 **§11 v3.10.50 版本差异补充**。
+
+## 0\. 版本与源码说明
+
+| 版本 | 源码来源 | 源码目录 |
+|------|----------|----------|
+| v3.10.41 | GitHub 下载 release 压缩包（见 §1） | `/workspace/bk-cmdb-release-v3.10.41/` |
+| **v3.10.50**（本仓库） | 仓库内已内置，无需下载 | `/workspace/bk_cmdb_py/bk-cmdb-release-v3.10.50/` |
+
+> 若使用本仓库内置的 v3.10.50，请跳过 §1 的下载步骤，直接以 `bk-cmdb-release-v3.10.50` 作为源码根目录，并将后续所有命令中的路径替换为该目录。构建产物已归集至 `prod_bin/`（见 `prod_bin/build_manifest.txt`）。
+
+## 1\. 下载解压源码（仅 v3.10.41 需要）
 
 ```bash
 cd /workspace
@@ -100,6 +111,19 @@ npm run build
 
 构建产物：`src/bin/enterprise/cmdb/web/`
 
+> **v3.10.50 注意（webpack 5）**：v3.10.50 的 UI 基于 **webpack 5**，而 `package.json` 漏列了两个被 webpack 5 拆分为独立包的依赖，且 `@babel/runtime` 安装需规避 peer 冲突。请改用以下命令（否则 `npm run build` 会报 `Cannot find module 'terser-webpack-plugin'`）：
+> ```bash
+> # 安装依赖（--ignore-scripts 跳过 fibers 编译问题，--legacy-peer-deps 兼容旧依赖）
+> npm install --ignore-scripts --legacy-peer-deps
+> # 补充 @babel/runtime（源码缺此依赖，必须加 --legacy-peer-deps 否则与 eslint-config-tencent peer 冲突）
+> npm install @babel/runtime@^7.0.0 --legacy-peer-deps
+> # 补充 webpack 5 拆分出的依赖（package.json 漏列）
+> npm install terser-webpack-plugin@^5 webpack-cli@^4 --legacy-peer-deps
+> # 生产构建（BUILD_OUTPUT 仅从 process.argv 读取、不读环境变量，未传参时落到默认路径）
+> npm run build
+> ```
+> 构建产物路径与 v3.10.41 一致：`src/bin/enterprise/cmdb/web/`。
+
 \---
 
 ## 6\. 编译 Go 后端服务（最小化服务集）
@@ -117,6 +141,12 @@ make -C web\_server                    # cmdb\_webserver
 ```
 
 编译产物：`src/bin/build/cmdb\_\*/cmdb\_\*`
+
+> **v3.10.50 注意（VERSION 与产物路径）**：v3.10.50 目录是 `bk_cmdb_py` 这个 git 仓库的**子目录**（非独立仓库），`git symbolic-ref` 返回的是外层仓库分支 `main`，因此 `VERSION` 默认解析为 `main`，编译产物会落在 `src/bin/build/main/`。
+> - 若想让产物路径带上版本号（如 `src/bin/build/v3.10.50/`），在构建前 `export VERSION=v3.10.50` 即可（`scripts/Makefile` 中 `VERSION?=...` 为「未设才赋值」，环境变量优先级更高）。
+> - 首次编译需下载 Go 模块，建议配置国内代理加速：`export GOPROXY=https://goproxy.cn,direct GOSUMDB=off`。
+> - Go 1.21.x 可正常编译 v3.10.50；仅编译上述 6 个最小服务约 40~60 秒（模块已缓存时更快）。
+> - 仅构建这 6 个服务即可满足 CMDB 基础运行；`make server` 会全量构建 11+ 服务且任一失败即中止，按需使用。
 
 \---
 
@@ -440,6 +470,68 @@ curl -s "http://127.0.0.1:8081/api/v3/biz/search/0" \\
 |webserver `register ip can not be 0.0.0.0`|绑定 0.0.0.0 时注册 IP 校验不通过|加 `--register-ip=127.0.0.1`|
 |登录后跳转到不可达的 `127.0.0.1:8083`|`domainUrl` 配置了绝对 URL|改为相对路径 `/`|
 |修改配置后服务未生效|配置存储在 ZK 中|调用 `POST /migrate/v3/migrate/config/refresh` 刷新 ZK 配置，再重启服务|
+|v3.10.50 UI 构建报 `Cannot find module 'terser-webpack-plugin'`|webpack 5 已将该包拆分为独立依赖，但 `package.json` 漏列|`npm install terser-webpack-plugin@^5 webpack-cli@^4 --legacy-peer-deps`|
+|v3.10.50 安装 `@babel/runtime` 报 peer 冲突（eslint-config-tencent）|npm 11 严格校验 peer 依赖|安装时加 `--legacy-peer-deps`|
+|v3.10.50 编译产物落在 `src/bin/build/main/` 而非版本目录|v3.10.50 是 `bk_cmdb_py` 仓库子目录，`git symbolic-ref` 返回外层分支 `main`|构建前 `export VERSION=v3.10.50`|
+
+\---
+
+## 11\. v3.10.50 版本差异补充
+
+本仓库实际内置源码为 **bk-cmdb v3.10.50**（`bk-cmdb-release-v3.10.50/`），与本文档基线 v3.10.41 的整体流程一致，差别集中在「源码来源」与「UI 依赖补丁」。以下为 v3.10.50 实测补充。
+
+### 11.1 源码来源
+
+- v3.10.41：按 §1 从 GitHub 下载 `release-v3.10.41.zip`。
+- **v3.10.50（本仓库）**：已内置，路径 `/workspace/bk_cmdb_py/bk-cmdb-release-v3.10.50/`，**跳过 §1 下载步骤**，后续命令中的 `bk-cmdb-release-v3.10.41` 全部替换为 `bk-cmdb-release-v3.10.50`。
+
+### 11.2 UI 构建差异（webpack 5）
+
+v3.10.50 的 UI 使用 **webpack 5**，而 `package.json` 漏列了 webpack 5 拆分出的 `terser-webpack-plugin` / `webpack-cli`；同时 `@babel/runtime` 安装会触发 `eslint-config-tencent` 的 peer 冲突。完整命令：
+
+```bash
+cd /workspace/bk_cmdb_py/bk-cmdb-release-v3.10.50/src/ui
+npm config set registry https://mirrors.cloud.tencent.com/npm/
+
+npm install --ignore-scripts --legacy-peer-deps
+npm install @babel/runtime@^7.0.0 --legacy-peer-deps
+npm install terser-webpack-plugin@^5 webpack-cli@^4 --legacy-peer-deps
+
+# BUILD_OUTPUT 仅从 process.argv 读取、不读环境变量；未传参时落到默认路径
+npm run build
+```
+
+- 构建产物：`src/bin/enterprise/cmdb/web/`（与 v3.10.41 一致）。
+- 若想自定义输出目录，需通过 `npm run build BUILD_OUTPUT=/abs/path` 传参（而非环境变量）。
+
+### 11.3 Go 后端编译差异
+
+```bash
+cd /workspace/bk_cmdb_py/bk-cmdb-release-v3.10.50/src
+export GOPROXY=https://goproxy.cn,direct GOSUMDB=off
+export VERSION=v3.10.50   # 可选：让产物落在 src/bin/build/v3.10.50/ 而非默认的 main
+
+for svc in scene_server/admin_server source_controller/coreservice \
+           scene_server/topo_server scene_server/host_server \
+           apiserver web_server; do
+  make -C $svc
+done
+```
+
+- 版本与产物路径：`bk-cmdb-release-v3.10.50` 是 `bk_cmdb_py` 仓库的子目录，`git symbolic-ref` 返回外层分支 `main`，故 `VERSION` 默认解析为 `main`，产物在 `src/bin/build/main/`；`export VERSION=v3.10.50` 可得到干净的版本目录。
+- 工具链：Go 1.21.x 可正常编译；6 个最小服务约 40~60 秒（模块已缓存更快）。
+- 范围：`make server` 会全量构建 11+ 服务且任一失败即中止；仅运行基础 CMDB 时构建上述 6 个服务即可。
+
+### 11.4 产物归集（已执行）
+
+按本任务要求，已将构建产物归集至仓库内 `prod_bin/`：
+
+| 类别 | 位置 | 内容 |
+|------|------|------|
+| 后端 | `prod_bin/server/` | 6 个 Go 服务二进制（226M） |
+| 前端 | `prod_bin/ui/` | Vue 生产构建静态资源（14M，388 文件） |
+
+详细清单见 `prod_bin/build_manifest.txt`。后续启动仍按 §7~§9 配置 `/data/cmdb` 并启动服务。
 
 
 
