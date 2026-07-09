@@ -1,0 +1,14 @@
+configServer:
+  addrs: 127.0.0.1:2181
+  usr:
+  pwd:
+registerServer:
+  addrs: 127.0.0.1:2181
+  usr:
+  pwd:
+confs:
+  dir: /data/cmdb/cmdb_adminserver/configures
+errors:
+  res: /data/cmdb/cmdb_adminserver/conf/errors
+language:
+  res: /data/cmdb/cmdb_adminserver/conf/language

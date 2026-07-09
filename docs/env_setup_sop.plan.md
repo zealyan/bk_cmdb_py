@@ -129,13 +129,14 @@ npm run build
 ## 6\. 编译 Go 后端服务（最小化服务集）
 
 ```bash
-# 最小化 6 个服务：adminserver、coreservice、toposerver、hostserver、apiserver、webserver
+# 最小化 7 个服务：adminserver、coreservice、toposerver、hostserver、procserver、apiserver、webserver
 cd /workspace/bk-cmdb-release-v3.10.41/src
 
 make -C scene\_server/admin\_server    # cmdb\_adminserver
 make -C source\_controller/coreservice # cmdb\_coreservice
 make -C scene\_server/topo\_server      # cmdb\_toposerver
 make -C scene\_server/host\_server      # cmdb\_hostserver
+make -C scene\_server/proc\_server      # cmdb\_procserver（进程模块：服务分类/服务模板/进程）
 make -C apiserver                     # cmdb\_apiserver
 make -C web\_server                    # cmdb\_webserver
 ```
@@ -145,8 +146,8 @@ make -C web\_server                    # cmdb\_webserver
 > **v3.10.50 注意（VERSION 与产物路径）**：v3.10.50 目录是 `bk_cmdb_py` 这个 git 仓库的**子目录**（非独立仓库），`git symbolic-ref` 返回的是外层仓库分支 `main`，因此 `VERSION` 默认解析为 `main`，编译产物会落在 `src/bin/build/main/`。
 > - 若想让产物路径带上版本号（如 `src/bin/build/v3.10.50/`），在构建前 `export VERSION=v3.10.50` 即可（`scripts/Makefile` 中 `VERSION?=...` 为「未设才赋值」，环境变量优先级更高）。
 > - 首次编译需下载 Go 模块，建议配置国内代理加速：`export GOPROXY=https://goproxy.cn,direct GOSUMDB=off`。
-> - Go 1.21.x 可正常编译 v3.10.50；仅编译上述 6 个最小服务约 40~60 秒（模块已缓存时更快）。
-> - 仅构建这 6 个服务即可满足 CMDB 基础运行；`make server` 会全量构建 11+ 服务且任一失败即中止，按需使用。
+> - Go 1.21.x 可正常编译 v3.10.50；仅编译上述 7 个最小服务约 40~60 秒（模块已缓存时更快）。
+> - 仅构建这 7 个服务即可满足 CMDB 基础运行；`make server` 会全量构建 11+ 服务且任一失败即中止，按需使用。
 
 \---
 
@@ -159,6 +160,7 @@ mkdir -p /data/cmdb/cmdb\_adminserver/{configures,conf/errors,conf/language,logs
 mkdir -p /data/cmdb/cmdb\_coreservice/logs
 mkdir -p /data/cmdb/cmdb\_toposerver/logs
 mkdir -p /data/cmdb/cmdb\_hostserver/logs
+mkdir -p /data/cmdb/cmdb\_procserver/logs
 mkdir -p /data/cmdb/cmdb\_apiserver/logs
 mkdir -p /data/cmdb/cmdb\_webserver/logs
 mkdir -p /data/cmdb/web
@@ -168,6 +170,7 @@ cp src/bin/build/cmdb\_adminserver/cmdb\_adminserver /data/cmdb/cmdb\_adminserve
 cp src/bin/build/cmdb\_coreservice/cmdb\_coreservice /data/cmdb/cmdb\_coreservice/
 cp src/bin/build/cmdb\_toposerver/cmdb\_toposerver /data/cmdb/cmdb\_toposerver/
 cp src/bin/build/cmdb\_hostserver/cmdb\_hostserver /data/cmdb/cmdb\_hostserver/
+cp src/bin/build/cmdb\_procserver/cmdb\_procserver /data/cmdb/cmdb\_procserver/
 cp src/bin/build/cmdb\_apiserver/cmdb\_apiserver /data/cmdb/cmdb\_apiserver/
 cp src/bin/build/cmdb\_webserver/cmdb\_webserver /data/cmdb/cmdb\_webserver/
 
@@ -342,7 +345,7 @@ tls:
 
 ## 8\. 启动 Go 服务（按顺序）
 
-> \*\*启动顺序\*\*：adminserver → coreservice → toposerver → hostserver → apiserver → webserver
+> \*\*启动顺序\*\*：adminserver → coreservice → toposerver → hostserver → procserver → apiserver → webserver
 
 ```bash
 # 1. adminserver（使用 --config 而非 --regdiscv）
@@ -380,7 +383,16 @@ nohup ./cmdb\_hostserver \\
   --enable-auth=false \\
   > ./logs/std.log 2>\&1 \&
 
-# 5. apiserver
+# 5. procserver（进程模块：服务分类/服务模板/进程，端口 60003）
+cd /data/cmdb/cmdb\_procserver
+nohup ./cmdb\_procserver \\
+  --addrport=127.0.0.1:60003 \\
+  --logtostderr=false --log-dir=./logs --v=3 \\
+  --regdiscv=127.0.0.1:2181 \\
+  --enable-auth=false \\
+  > ./logs/std.log 2>\&1 \&
+
+# 6. apiserver
 cd /data/cmdb/cmdb\_apiserver
 nohup ./cmdb\_apiserver \\
   --addrport=127.0.0.1:8081 \\
@@ -389,7 +401,7 @@ nohup ./cmdb\_apiserver \\
   --enable-auth=false \\
   > ./logs/std.log 2>\&1 \&
 
-# 6. webserver（绑定 0.0.0.0 支持外部访问，--register-ip 避免 0.0.0.0 注册报错）
+# 7. webserver（绑定 0.0.0.0 支持外部访问，--register-ip 避免 0.0.0.0 注册报错）
 cd /data/cmdb/cmdb\_webserver
 nohup ./cmdb\_webserver \\
   --addrport=0.0.0.0:8083 \\
@@ -453,6 +465,7 @@ curl -s "http://127.0.0.1:8081/api/v3/biz/search/0" \\
 |cmdb\_coreservice|50009|127.0.0.1|
 |cmdb\_toposerver|60002|127.0.0.1|
 |cmdb\_hostserver|60001|127.0.0.1|
+|cmdb\_procserver|60003|127.0.0.1|
 |cmdb\_apiserver|8081|127.0.0.1|
 |cmdb\_webserver|8083|0.0.0.0|
 
@@ -513,14 +526,14 @@ export VERSION=v3.10.50   # 可选：让产物落在 src/bin/build/v3.10.50/ 而
 
 for svc in scene_server/admin_server source_controller/coreservice \
            scene_server/topo_server scene_server/host_server \
-           apiserver web_server; do
+           scene_server/proc_server apiserver web_server; do
   make -C $svc
 done
 ```
 
 - 版本与产物路径：`bk-cmdb-release-v3.10.50` 是 `bk_cmdb_py` 仓库的子目录，`git symbolic-ref` 返回外层分支 `main`，故 `VERSION` 默认解析为 `main`，产物在 `src/bin/build/main/`；`export VERSION=v3.10.50` 可得到干净的版本目录。
-- 工具链：Go 1.21.x 可正常编译；6 个最小服务约 40~60 秒（模块已缓存更快）。
-- 范围：`make server` 会全量构建 11+ 服务且任一失败即中止；仅运行基础 CMDB 时构建上述 6 个服务即可。
+- 工具链：Go 1.21.x 可正常编译；7 个最小服务约 40~60 秒（模块已缓存更快）。
+- 范围：`make server` 会全量构建 11+ 服务且任一失败即中止；仅运行基础 CMDB 时构建上述 7 个服务即可。
 
 ### 11.4 产物归集（已执行）
 
@@ -528,10 +541,34 @@ done
 
 | 类别 | 位置 | 内容 |
 |------|------|------|
-| 后端 | `prod_bin/server/` | 6 个 Go 服务二进制（226M） |
+| 后端 | `prod_bin/server/` | 7 个 Go 服务二进制（含 cmdb_procserver，约 264M） |
 | 前端 | `prod_bin/ui/` | Vue 生产构建静态资源（14M，388 文件） |
 
 详细清单见 `prod_bin/build_manifest.txt`。后续启动仍按 §7~§9 配置 `/data/cmdb` 并启动服务。
+
+### 11.5 基于 prod_bin 的一键部署（已提供）
+
+为免重复手工配置，已在 `prod_bin/deploy/` 下提供自包含部署脚本，直接复用 §2~§9 的产物与参数：
+
+| 文件 | 作用 |
+|------|------|
+| `prod_bin/deploy/setup_deps.sh` | 安装并启动依赖：MongoDB 4.4.29（副本集 rs0 / cc:cc）、Redis 7（密码 `cmdb_redis`）、ZooKeeper 3.8.6（2181）。幂等，已安装则跳过 |
+| `prod_bin/deploy/start.sh` | 部署并启动：建 `/data/cmdb` 目录、拷贝二进制/配置/资源/前端、按序起 7 服务、执行 migrate、健康检查。支持 `start`/`stop`/`status` |
+| `prod_bin/deploy/conf/*.yaml` | migrate / mongodb / redis / common / extra 五份配置（参数同 §7.2） |
+| `prod_bin/resources/errors`、`prod_bin/resources/language` | 错误码与语言包（`cn`/`en`/`default/comon.json`），由 `src/common/{errors,language}/examples/errorres/` 归集而来，使部署不依赖源码树 |
+
+使用步骤：
+
+```bash
+cd /workspace/bk_cmdb_py/prod_bin/deploy
+./setup_deps.sh      # 首次：安装并启动 MongoDB/Redis/ZK（约 1~2 分钟）
+./start.sh           # 部署 + 启动 7 服务 + migrate + 健康检查
+./start.sh status    # 查看服务运行状态
+./start.sh stop      # 停止全部 CMDB 服务（依赖保留）
+```
+
+> 说明：`cmdb_adminserver` 以 `--config=configures/migrate.yaml` 启动，其余 6 个服务以 `--regdiscv=127.0.0.1:2181` 从 ZK 读取配置；`webserver` 绑定 `0.0.0.0:8083` 并加 `--register-ip=127.0.0.1`。其中 **`cmdb_procserver`（端口 60003）** 承载 `/process/` 进程模块（服务分类、服务模板、进程实例等）。`status`/`stop` 按进程名 `cmdb_<svc>` 匹配（进程 cmdline 为相对路径 `./cmdb_<svc>`，非绝对路径）。
+
 
 
 

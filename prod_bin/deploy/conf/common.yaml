@@ -1,0 +1,68 @@
+es:
+  fullTextSearch: "off"
+  url: http://127.0.0.1:9200
+  usr:
+  pwd:
+
+webServer:
+  api:
+    version: v3
+  session:
+    name: cc3
+    defaultlanguage: zh-cn
+    multipleOwner: "0"
+    userInfo: admin:admin          # Web 登录账号密码
+  site:
+    domainUrl: /                   # 相对路径，预览环境兼容
+    bkLoginUrl: http://127.0.0.1:8083/login/?app_id=%s&c_url=%s
+    appCode: cc
+    checkUrl: http://127.0.0.1:8083/login/accounts/get_user/?bk_token=
+    htmlRoot: /data/cmdb/web       # 前端文件路径
+    authscheme: internal           # 内置权限模式，不使用 IAM
+  login:
+    version: opensource            # 开源登录方式
+
+authServer:
+  address: ""
+  appCode: bk_cmdb
+  appSecret: ""
+
+datacollection:
+  hostsnap:
+    reportMode: redis
+    changeRangePercent: 10
+    rateLimiter:
+      qps: 40
+      burst: 100
+
+eventServer:
+  hostIdentifier:
+    startUp: false
+
+cloudServer:
+  cryptor:
+    enableCryptor: false
+
+monitor:
+  pluginName: noop
+  enableMonitor: false
+
+openTelemetry:
+  enable: false
+
+gse:
+  apiServer:
+    endpoints:
+  taskServer:
+    endpoints:
+
+kafka:
+  snap:
+    brokers:
+    groupID: bk_cmdb_snapshot_group
+
+tls:
+  insecureSkipVerify:
+  certFile:
+  keyFile:
+  caFile:
