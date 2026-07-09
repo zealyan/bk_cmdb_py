@@ -1,0 +1,31 @@
+<!doctype html><html><head><meta charset="utf-8"><title></title><script>(function () {
+        // 直调PaaS接口时，如果本平台为https,PaaS为http，则需要在head中声明如下的meta才能避免被csp拦截
+        if (window.location.protocol.startsWith('https')) {
+          var meta = document.createElement('meta')
+          meta.setAttribute('http-equiv', 'Content-Security-Policy')
+          meta.setAttribute('content', 'upgrade-insecure-requests')
+          document.head.appendChild(meta)
+        }
+      })();</script><link rel="shortcut icon" href="/static/favicon.ico" type="image/x-icon"><script defer="defer" src="/static/js/runtime.9a1b6524c413979c164c.js"></script><script defer="defer" src="/static/js/bk-magicbox.6531ed3899ac7948f483.js"></script><script defer="defer" src="/static/js/vendors.887daa5d737d4a71a014.js"></script><script defer="defer" src="/static/js/app.302e425a3d3fe8c771ae.js"></script><link href="/static/css/bk-magicbox7f0e7fa.css" rel="stylesheet"><link href="/static/css/app8abefeb.css" rel="stylesheet"></head><body><div id="app"></div><script>window.Site = {
+            url: {{.site}},
+            version: {{.version}},
+            login: {{.curl}},
+            agent: {{.agentAppUrl}},
+            authscheme: {{.authscheme}},
+            buildVersion: '{{.ccversion}}',
+            fullTextSearch: {{.fullTextSearch}},
+            helpDocUrl: {{.helpDocUrl}},
+            disableOperationStatistic: {{.disableOperationStatistic}}
+        }
+        window.User = {
+            admin: {{.role}},
+            name: {{.userName}}
+        }
+        window.Supplier = {
+            account: '0'
+        }
+        window.ESB = {
+          userManage: {{.userManage}}
+        }
+        window.API_HOST = Site.buildVersion.indexOf('dev') !== -1 ? Site.url : (window.location.origin + '/')
+        window.API_PREFIX = API_HOST + 'api/' + Site.version</script></body></html>

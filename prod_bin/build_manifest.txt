@@ -1,0 +1,69 @@
+================================================================
+bk_cmdb_py / prod_bin 构建产物清单
+================================================================
+生成时间 : 2026-07-09
+源码版本 : bk-cmdb v3.10.50 (bk-cmdb-release-v3.10.50)
+构建参考 : docs/env_setup_sop.plan.md (第 5、6 节)
+工具链   : Go 1.21.4 / Node 22.13.1 / npm 11.9.0
+
+----------------------------------------------------------------
+目录结构
+----------------------------------------------------------------
+prod_bin/
+├── server/                # Go 后端 6 个最小服务二进制 (226M)
+│   ├── cmdb_adminserver/cmdb_adminserver
+│   ├── cmdb_coreservice/cmdb_coreservice
+│   ├── cmdb_toposerver/cmdb_toposerver
+│   ├── cmdb_hostserver/cmdb_hostserver
+│   ├── cmdb_apiserver/cmdb_apiserver
+│   └── cmdb_webserver/cmdb_webserver
+└── ui/                    # Vue 前端生产构建产物 (14M, 388 文件)
+    ├── index.html / login.html / login_success.html
+    ├── js/  css/  img/  svg/  fonts/  favicon.ico
+
+----------------------------------------------------------------
+后端服务 (server/)
+----------------------------------------------------------------
+服务              二进制大小   端口(参考)
+cmdb_adminserver   38M          60004
+cmdb_coreservice   38M          50009
+cmdb_toposerver    38M          60002
+cmdb_hostserver    35M          60001
+cmdb_apiserver     36M          8081
+cmdb_webserver     39M          8083
+
+版本抽查: cmdb_adminserver --version
+  Version   : v3.10.50
+  BuildTime : 2026-07-09T19:43:46+0800
+
+----------------------------------------------------------------
+前端产物 (ui/)
+----------------------------------------------------------------
+index.html (4.0K)   login.html   login_success.html
+js/  css/  img/  svg/  fonts/  favicon.ico
+总文件数: 388   总大小: 14M
+
+----------------------------------------------------------------
+与 SOP 的差异 / 必须的补丁
+----------------------------------------------------------------
+1. UI: 除 SOP 要求的 @babel/runtime 外，package.json 还漏列
+   terser-webpack-plugin / webpack-cli（webpack 5 已将其拆分为
+   独立包）。需额外安装，否则 builder/webpack/optimization.js
+   报 "Cannot find module 'terser-webpack-plugin'"。
+   -> npm install terser-webpack-plugin@^5 webpack-cli@^4 --legacy-peer-deps
+2. UI: @babel/runtime 安装须加 --legacy-peer-deps，否则与
+   eslint-config-tencent 的 peer 冲突导致 npm install 失败。
+3. UI: 本项目即 webpack 5，BUILD_OUTPUT 仅从 process.argv 读取、
+   不读环境变量；未传参时输出到默认路径
+   src/bin/enterprise/cmdb/web（与 SOP 第 5 节描述一致）。
+4. 后端: 仅构建 SOP 列出的 6 个最小服务（非全量 11+ 服务），
+   以加速并保证可用性；GOPROXY 使用 https://goproxy.cn 加速。
+
+----------------------------------------------------------------
+后续启动 (参考 SOP 第 7~9 节)
+----------------------------------------------------------------
+- 配置目录 /data/cmdb/cmdb_*/configures + conf/{errors,language}
+- 启动顺序: adminserver -> coreservice -> toposerver ->
+  hostserver -> apiserver -> webserver
+- 数据库初始化: POST /migrate/v3/migrate/community/0
+================================================================
