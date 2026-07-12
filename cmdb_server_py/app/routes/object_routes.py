@@ -9,6 +9,189 @@ object_bp = Blueprint('object', __name__)
 # 原项目权限错误码
 PERMISSION_DENIED_CODE = 9900403
 
+import re as _re
+
+
+def _to_int(v):
+    """将数字字符串安全地转为 int，失败原样返回。"""
+    if isinstance(v, bool):
+        return v
+    if isinstance(v, int):
+        return v
+    if isinstance(v, str):
+        try:
+            return int(v)
+        except ValueError:
+            try:
+                return int(float(v))
+            except ValueError:
+                return v
+    return v
+
+
+# 主键 / 自增 ID 字段集合：前端常以字符串形式传入（路由参数、表单值），
+# 需还原为 int 才能命中 Mongo 中以 int 存储的 ID 值（否则 "6" != 6 导致查不到）。
+_ID_FIELDS = {
+    "bk_inst_id", "bk_host_id", "bk_set_id", "bk_module_id",
+    "bk_biz_id", "bk_process_id", "bk_cloud_id", "bk_biz_set_id",
+    "bk_supplier_account",
+}
+
+
+def _coerce_value(field, value):
+    if field in _ID_FIELDS:
+        if isinstance(value, (list, tuple, set)):
+            return [_to_int(x) for x in value]
+        return _to_int(value)
+    return value
+
+
+def _ensure_list(v):
+    if isinstance(v, (list, tuple, set)):
+        return list(v)
+    return [v]
+
+
+def _first(v):
+    if isinstance(v, (list, tuple)) and v:
+        return v[0]
+    return v
+
+
+def _second(v):
+    if isinstance(v, (list, tuple)) and len(v) > 1:
+        return v[1]
+    return v
+
+
+def _derive_asset_id(obj_id, next_id):
+    """为缺失的必填资产编号（bk_asset_id）派生默认值，保证创建不被阻断。
+
+    bk-cmdb 交换机等模型的 bk_asset_id 标记为必填，但本地自运维场景下管理员常仅填名称即创建，
+    缺失时由后端派生 "<obj_id>-<inst_id>"（如 bk_switch-6）以保持字段完整。
+    """
+    return f"{obj_id}-{next_id}"
+
+
+def _convert_rule_to_query(rule):
+    """将 bk-cmdb 前端条件规则 {field, operator, value} 转换为 Mongo 查询片段。
+
+    对齐 bk-cmdb v3.10 前端 instance.js / filters/utils.js 实际发出的算子，
+    避免后端把整段 conditions 直接当 Mongo 查询而返回空结果。
+    """
+    if not isinstance(rule, dict):
+        return None
+    field = rule.get("field")
+    operator = rule.get("operator")
+    value = rule.get("value")
+    if not field or operator is None:
+        return None
+    value = _coerce_value(field, value)
+
+    op_map = {
+        "equal": lambda: {field: value},
+        "not_equal": lambda: {field: {"$ne": value}},
+        "$eq": lambda: {field: value},
+        "$ne": lambda: {field: {"$ne": value}},
+        "in": lambda: {field: {"$in": _ensure_list(value)}},
+        "not_in": lambda: {field: {"$nin": _ensure_list(value)}},
+        "$in": lambda: {field: {"$in": _ensure_list(value)}},
+        "$nin": lambda: {field: {"$nin": _ensure_list(value)}},
+        "less": lambda: {field: {"$lt": value}},
+        "less_or_equal": lambda: {field: {"$lte": value}},
+        "greater": lambda: {field: {"$gt": value}},
+        "greater_or_equal": lambda: {field: {"$gte": value}},
+        "datetime_greater_or_equal": lambda: {field: {"$gte": value}},
+        "datetime_less_or_equal": lambda: {field: {"$lte": value}},
+        "$lt": lambda: {field: {"$lt": value}},
+        "$lte": lambda: {field: {"$lte": value}},
+        "$gt": lambda: {field: {"$gt": value}},
+        "$gte": lambda: {field: {"$gte": value}},
+        "between": lambda: {field: {"$gte": _to_int(_first(value)), "$lte": _to_int(_second(value))}},
+        "not_between": lambda: {field: {"$lt": _to_int(_first(value)), "$gt": _to_int(_second(value))}},
+        "contains": lambda: {field: {"$regex": _re.escape(str(value)), "$options": "i"}},
+        "not_contains": lambda: {field: {"$not": {"$regex": _re.escape(str(value)), "$options": "i"}}},
+        "begins_with": lambda: {field: {"$regex": "^" + _re.escape(str(value)), "$options": "i"}},
+        "ends_with": lambda: {field: {"$regex": _re.escape(str(value)) + "$", "$options": "i"}},
+        "is_null": lambda: {field: {"$in": [None, ""]}},
+        "not_null": lambda: {field: {"$nin": [None, ""]}},
+    }
+    fn = op_map.get(operator)
+    if fn is None:
+        # 未知算子默认按等于处理，避免整条条件被丢弃
+        return {field: value}
+    try:
+        return fn()
+    except Exception:
+        return {field: value}
+
+
+def build_instance_query(req_data):
+    """将前端实例搜索条件统一转换为 Mongo 查询。
+
+    前端可能发送三种结构：
+    - conditions: { condition: 'AND'|'OR', rules: [{field, operator, value}] }（主用）
+    - time_condition: { oper: 'and', rules: [{field, start, end}] }（时间区间）
+    - condition: { field: value, ... }（旧版扁平结构，或内嵌 rules 结构）
+    归一化为 Mongo 查询 dict；空条件返回 {}（匹配全部实例）。
+    """
+    query = {}
+    if not isinstance(req_data, dict):
+        return query
+
+    conditions = req_data.get("conditions")
+    if isinstance(conditions, dict) and conditions.get("rules") is not None:
+        rules = conditions.get("rules") or []
+        logic = str(conditions.get("condition", "AND")).upper()
+        fragments = []
+        for rule in rules:
+            frag = _convert_rule_to_query(rule)
+            if frag:
+                fragments.append(frag)
+        if fragments:
+            if logic == "OR":
+                query["$or"] = fragments
+            else:
+                for frag in fragments:
+                    query.update(frag)
+
+    # 时间区间条件
+    time_condition = req_data.get("time_condition")
+    if isinstance(time_condition, dict) and time_condition.get("rules"):
+        logic = str(time_condition.get("oper", "and")).lower()
+        fragments = []
+        for rule in time_condition.get("rules") or []:
+            field = rule.get("field")
+            start = rule.get("start")
+            end = rule.get("end")
+            if not field:
+                continue
+            frag = {field: {}}
+            if start is not None:
+                frag[field]["$gte"] = start
+            if end is not None:
+                frag[field]["$lte"] = end
+            if frag[field]:
+                fragments.append(frag)
+        if fragments:
+            if logic == "or":
+                query.setdefault("$or", []).extend(fragments)
+            else:
+                for frag in fragments:
+                    query.update(frag)
+
+    # 旧版扁平 condition
+    condition = req_data.get("condition")
+    if isinstance(condition, dict):
+        if condition.get("rules") is not None:
+            return build_instance_query({"conditions": condition})
+        for k, v in condition.items():
+            if k in ("condition", "rules"):
+                continue
+            query[k] = v
+
+    return query
+
 
 def make_response(result=True, code=0, message="success", data=None, **kwargs):
     # bk-cmdb 前端统一以 bk_error_code===0 判定请求成功并取 data；
@@ -89,18 +272,21 @@ def _parse_body():
 
 
 def normalize_inst_doc(doc, obj_id):
-    """对齐 bk-cmdb：实例搜索/拓扑响应始终附带 bk_inst_id（真实主键字段的别名）。
+    """对齐 bk-cmdb：实例搜索/拓扑响应始终附带 bk_inst_id 与 bk_obj_id。
 
-    前端编辑实例时按 `instState.bk_inst_id` 拼出
-    PUT /update/instance/object/{obj}/inst/{id} 的 URL。host 的真实主键是 bk_host_id、
-    通用对象是 bk_inst_id，若响应里不补 bk_inst_id，前端拿到 undefined → URL 变成
-    inst/undefined → 更新 404。真实 bk-cmdb 的搜索层会补这个字段，这里对齐。
+    前端编辑实例时按 `instState.bk_obj_id` + `instState.bk_inst_id` 拼出
+    PUT /update/instance/object/{obj}/inst/{id} 的 URL。若响应里缺这两个字段，
+    前端拿到 undefined → URL 变成 inst/undefined → 更新 404。真实 bk-cmdb 的搜索层
+    会补这两个字段，这里对齐。host 的真实主键是 bk_host_id、通用对象是 bk_inst_id。
     """
     if not doc:
         return doc
     id_field = get_inst_id_field(obj_id)
     if "bk_inst_id" not in doc and id_field in doc:
         doc["bk_inst_id"] = doc[id_field]
+    # 补全模型标识，供前端编辑时拼 URL（bk_switch 等通用对象）
+    if "bk_obj_id" not in doc:
+        doc["bk_obj_id"] = obj_id
     return doc
 
 
@@ -859,15 +1045,16 @@ def search_instances_by_obj(obj_id):
         
         fields = req_data.get('fields', [])
         page = req_data.get('page', {})
-        conditions = req_data.get('conditions', {})
-        
+        # 将前端 conditions（{condition, rules}）/ condition（扁平）/ time_condition
+        # 统一转换为合法 Mongo 查询；空条件返回 {}（匹配全部）。
+        query = build_instance_query(req_data)
+
         start = page.get('start', 0)
         limit = page.get('limit', 20)
         sort = page.get('sort', 'bk_inst_id')
-        
+
         try:
             collection_name = get_inst_collection_name(obj_id)
-            query = conditions if conditions else {}
             
             collection = get_mongo_collection(collection_name)
             cursor = collection.find(query)
@@ -929,12 +1116,11 @@ def count_instances_by_obj(obj_id):
             except:
                 req_data = {}
         
-        conditions = req_data.get('conditions', {})
-        
+        query = build_instance_query(req_data)
+
         count = 0
         try:
             collection_name = get_inst_collection_name(obj_id)
-            query = conditions if conditions else {}
             # biz 默认排除 disabled
             if obj_id == 'biz' and not conditions:
                 query = {"bk_data_status": {"$ne": "disabled"}}
@@ -1200,13 +1386,23 @@ def create_instance(obj_id):
     try:
         req_data = _parse_body()
 
-        # 后端必填校验（兜底，前端 v-validate 已拦截；此处防止绕过）：
-        # 仅校验 cc_ObjAttDes 中 is_required=true 且非「后端自动生成 ID 字段」的属性。
         id_field = get_inst_id_field(obj_id)
+        # 后端自动生成的主键字段（不计入必填校验）
         auto_id_props = {
             "bk_biz_id", "bk_set_id", "bk_module_id", "bk_inst_id",
             "bk_host_id", "bk_process_id", "bk_cloud_id", "bk_biz_set_id",
         }
+        # 缺失时由后端自动派生的必填字段（保持数据完整，避免仅填名称即被拒）
+        auto_fill_props = {"bk_asset_id"}
+
+        collection_name = get_inst_collection_name(obj_id)
+        collection = get_mongo_collection(collection_name)
+        conn = get_db_connection()
+        # 提前生成自增 ID，供缺失必填字段派生（如 bk_asset_id）
+        next_id = next_sequence(conn, collection_name)
+
+        # 后端必填校验（兜底，前端 v-validate 已拦截；此处防止绕过）：
+        # 仅校验 cc_ObjAttDes 中 is_required=true 且非「后端自动生成 ID 字段」的属性。
         att_collection = get_mongo_collection('cc_ObjAttDes')
         required_attrs = list(att_collection.find(
             {"bk_obj_id": obj_id, "is_required": True},
@@ -1216,6 +1412,10 @@ def create_instance(obj_id):
         for a in required_attrs:
             pid = a.get("bk_property_id")
             if pid in auto_id_props:
+                continue
+            # 可自动派生的必填字段：缺失时补默认值，不计入缺失清单
+            if pid in auto_fill_props and not req_data.get(pid):
+                req_data[pid] = _derive_asset_id(obj_id, next_id)
                 continue
             val = req_data.get(pid)
             if val is None or (isinstance(val, str) and val.strip() == ""):
@@ -1229,15 +1429,12 @@ def create_instance(obj_id):
         # 获取实例数据，过滤掉 None 值但保留空字符串和 0
         instance_data = {k: v for k, v in req_data.items() if v is not None}
 
-        collection_name = get_inst_collection_name(obj_id)
-        collection = get_mongo_collection(collection_name)
-
-        # 全局原子自增 ID（对齐 Go NextSequence, redirectTable 自动处理分表→主表）
-        conn = get_db_connection()
-        next_id = next_sequence(conn, collection_name)
-
         # 用真实主键字段写入（host->bk_host_id，通用对象->bk_inst_id …）
         instance_data[id_field] = next_id
+        # 资产编号（bk_asset_id）为空时派生默认值，保证字段完整（其为非必填可选字段）
+        _asset = instance_data.get("bk_asset_id")
+        if _asset is None or (isinstance(_asset, str) and _asset.strip() == ""):
+            instance_data["bk_asset_id"] = _derive_asset_id(obj_id, next_id)
         instance_data.setdefault("bk_supplier_account", "0")
         instance_data.setdefault("bk_data_status", "active")
         instance_data.setdefault("create_time", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
