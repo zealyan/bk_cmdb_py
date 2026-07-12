@@ -151,8 +151,11 @@ def biz_search(account):
         # 移除_id字段
         for biz in businesses:
             biz.pop('_id', None)
-        
-        return make_response(info=businesses, count=total_count)
+
+        # 注意：前端 $http 默认 transformData=true，会取响应的 data 字段做解析，
+        # 因此必须返回 data:{count, info}（bk-cmdb 标准契约），否则 data 为 undefined
+        # 导致 getTableData 中 data.count 抛错、业务列表恒为空（“暂无有权权限业务”）。
+        return make_response(data={'count': total_count, 'info': businesses})
     except Exception as e:
         print(f"搜索业务失败: {e}")
         return make_response(result=False, code=500, message=str(e))
