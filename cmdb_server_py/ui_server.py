@@ -16,8 +16,11 @@
 import os
 import sys
 import json
+import time
+import logging
 import requests
-from flask import Flask, request, redirect, Response, make_response, jsonify
+from logging.handlers import RotatingFileHandler
+from flask import Flask, request, redirect, Response, make_response, jsonify, g
 
 # 让本文件在任意工作目录下都能 import app 包
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -42,6 +45,54 @@ CC_VERSION = os.environ.get("CC_VERSION", "v3.10.50")
 
 app = Flask(__name__, static_folder=STATIC_DIR, static_url_path="/static")
 app.config.from_object(Config)
+
+
+# ---------------------------------------------------------------------------
+# 服务器访问日志：写入文件，便于排查问题（前端 404 / 代理 502 等）
+#   - 日志文件：<BASE_DIR>/logs/ui_server.log（滚动，单文件 10MB，保留 5 份）
+#   - 同时输出到 stdout（supervisord 还会捕获到 /tmp/supervisor-cmdb-ui.log）
+# ---------------------------------------------------------------------------
+LOG_DIR = os.path.join(BASE_DIR, "logs")
+os.makedirs(LOG_DIR, exist_ok=True)
+LOG_FILE = os.path.join(LOG_DIR, "ui_server.log")
+
+ui_logger = logging.getLogger("ui_server")
+ui_logger.setLevel(logging.INFO)
+if not ui_logger.handlers:
+    _fh = RotatingFileHandler(LOG_FILE, maxBytes=10 * 1024 * 1024, backupCount=5, encoding="utf-8")
+    _fh.setFormatter(logging.Formatter(
+        "%(asctime)s %(levelname)s %(message)s", datefmt="%Y-%m-%d %H:%M:%S"
+    ))
+    ui_logger.addHandler(_fh)
+    _sh = logging.StreamHandler(sys.stdout)
+    _sh.setFormatter(logging.Formatter(
+        "%(asctime)s %(levelname)s %(message)s", datefmt="%Y-%m-%d %H:%M:%S"
+    ))
+    ui_logger.addHandler(_sh)
+    ui_logger.propagate = False
+
+
+@app.before_request
+def _ui_log_before():
+    g._ui_start = time.time()
+
+
+@app.after_request
+def _ui_log_after(response):
+    start = getattr(g, "_ui_start", None)
+    duration = f"{(time.time() - start) * 1000:.1f}ms" if start else "-"
+    client = request.headers.get("X-Forwarded-For", request.remote_addr)
+    ui_logger.info(
+        f"ACCESS method={request.method} path={request.path} "
+        f"status={response.status_code} duration={duration} client={client}"
+    )
+    # 对代理失败（502）/ 服务端错误（>=500）额外告警，便于定位
+    if response.status_code == 502 or response.status_code >= 500:
+        ui_logger.warning(
+            f"UPSTREAM_ERROR method={request.method} path={request.path} "
+            f"status={response.status_code}"
+        )
+    return response
 
 
 # ---------------------------------------------------------------------------
@@ -274,9 +325,11 @@ def object_count():
         return make_response("", 204)
     cols = set(list_collections())
     # 已注册的对象模型（用于区分「模型不存在」与「模型存在但无实例集合」）
+    # 修复：模型定义由 initdb 写入 cc_ObjDes（共 11 个），cc_ObjectBase（无 supplier 后缀）为空；
+    # 之前误读 cc_ObjectBase，使所有 obj_id 都被判为 "model not found"，资源目录计数全 0。
     valid_obj_ids = {
         d.get("bk_obj_id")
-        for d in get_db_connection()["cc_ObjectBase"].find({}, {"bk_obj_id": 1})
+        for d in get_db_connection()["cc_ObjDes"].find({}, {"bk_obj_id": 1})
     }
     payload = request.get_json(silent=True) or {}
     obj_ids = (payload.get("condition") or {}).get("obj_ids") or []
@@ -285,7 +338,7 @@ def object_count():
     data = []
     for oid in obj_ids:
         if oid not in valid_obj_ids:
-            # 模型在 cc_ObjectBase 中不存在：与 bk-cmdb nonexistentObjects 一致
+            # 模型在 cc_ObjDes 中不存在：与 bk-cmdb nonexistentObjects 一致
             data.append({"bk_obj_id": oid, "inst_count": 0, "error": "model not found"})
             continue
         table = _resolve_inst_table(oid, cols)

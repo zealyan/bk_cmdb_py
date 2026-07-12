@@ -1,3 +1,5 @@
+import json
+from datetime import datetime
 from flask import Blueprint, jsonify, request
 from app.models.db import get_mongo_collection, get_db_connection
 
@@ -44,6 +46,41 @@ def _cond_to_mongo(cond_list):
         elif op == "$eq":
             q[field] = val
         elif op in ("$ne", "$gt", "$gte", "$lt", "$lte"):
+            q.setdefault(field, {})[op] = val
+        else:
+            q[field] = val
+    return q
+
+
+def get_inst_asst_collection_name(obj_id):
+    """返回实例关联的分表名，对齐 Go GetObjectInstAsstTableName 返回 cc_InstAsst_0_pub_{obj_id}。"""
+    return "cc_InstAsst_0_pub_%s" % obj_id
+
+
+def _rules_to_mongo(rules):
+    """将前端 conditions.rules 规则树转为 Mongo 查询字典。
+    
+    rules = [{field, operator, value}, ...]
+    operator 支持 'equal'/'$eq'/'not_equal'/'$ne'/'in'/'$in'/'not_in'/'$nin'
+    """
+    q = {}
+    for r in (rules or []):
+        field = r.get("field")
+        op = r.get("operator", "equal")
+        val = r.get("value")
+        if not field:
+            continue
+        if op in ("equal", "eq", "$eq"):
+            q[field] = val
+        elif op in ("not_equal", "$ne"):
+            q[field] = {"$ne": val}
+        elif op in ("in", "$in"):
+            q[field] = {"$in": val if isinstance(val, list) else [val]}
+        elif op in ("not_in", "$nin"):
+            q[field] = {"$nin": val if isinstance(val, list) else [val]}
+        elif op == "$regex":
+            q[field] = {"$regex": val, "$options": "i"}
+        elif op in ("$gt", "$gte", "$lt", "$lte"):
             q.setdefault(field, {})[op] = val
         else:
             q[field] = val
@@ -123,6 +160,10 @@ def _normalize_host_doc(doc):
     for k, v in list(doc.items()):
         if isinstance(v, list):
             doc[k] = ",".join(str(x) for x in v)
+    # 对齐 bk-cmdb：实例响应始终带 bk_inst_id（host 真实主键为 bk_host_id 的别名），
+    # 前端编辑实例时据此拼 PUT /update/instance/object/host/inst/{id} 的 URL。
+    if "bk_inst_id" not in doc and "bk_host_id" in doc:
+        doc["bk_inst_id"] = doc["bk_host_id"]
     return doc
 
 
@@ -708,7 +749,9 @@ def find_object():
         bk_obj_id = req_data.get('bk_obj_id', '')
         
         objects = []
-        collection = get_mongo_collection('cc_ObjectBase')
+        # 修复：对象模型定义由 initdb 写入 cc_ObjDes（共 11 个），cc_ObjectBase 为空集合；
+        # 之前误读 cc_ObjectBase 导致 find/object 返回空。
+        collection = get_mongo_collection('cc_ObjDes')
         docs = collection.find({})
         # 简单的排序
         docs_sorted = sorted(docs, key=lambda x: x.get("id", 0))
@@ -720,7 +763,7 @@ def find_object():
                 "bk_obj_name": doc.get("bk_obj_name"),
                 "bk_supplier_account": doc.get("bk_supplier_account"),
                 "bk_obj_icon": doc.get("bk_obj_icon"),
-                "is_built-in": doc.get("is_built_in"),
+                "is_built-in": doc.get("ispre"),
                 "is_pre": doc.get("is_pre")
             })
         
@@ -828,6 +871,107 @@ def hosts_search():
         return make_response(result=False, code=500, message=str(e))
 
 
+# 批量更新/删除主机时，从请求体中剔除的控制字段（非主机业务属性）
+_HOST_BATCH_SKIP = {
+    "bk_host_id", "bk_cloud_id", "metadata", "bk_supplier_account", "bk_data_status",
+}
+
+
+def _parse_json_body_flex():
+    """兼容 JSON / raw 的请求体解析，返回 dict。"""
+    req = request.get_json(silent=True)
+    if req is None:
+        try:
+            req = json.loads(request.data or b"{}")
+        except Exception:
+            req = {}
+    return req or {}
+
+
+def _host_ids_from_raw(raw):
+    """bk_host_id 可为数字或逗号分隔字符串，统一解析为 int 列表。"""
+    if raw is None:
+        return []
+    if isinstance(raw, bool):
+        return []
+    if isinstance(raw, (int, float)):
+        id_str = str(int(raw))
+    else:
+        id_str = str(raw)
+    ids = []
+    for x in id_str.split(","):
+        x = str(x).strip()
+        if x:
+            try:
+                ids.append(int(x))
+            except ValueError:
+                continue
+    return ids
+
+
+@admin_bp.route('/api/v3/hosts/batch', methods=['PUT'])
+@admin_bp.route('/hosts/batch', methods=['PUT'])
+def update_host_batch():
+    """批量更新主机属性（对齐 PUT /hosts/batch）。
+
+    前端 body: {<field>:<value>, ..., bk_host_id: "1,2,3"}（bk_host_id 可为数字或逗号字符串）。
+    剔除 bk_host_id / bk_cloud_id / metadata 等控制字段后，其余字段 $set 到 cc_HostBase。
+    """
+    try:
+        req = _parse_json_body_flex()
+        ids = _host_ids_from_raw(req.get("bk_host_id"))
+        if not ids:
+            return make_response(result=False, code=500, message="缺少或无效的 bk_host_id")
+        update_fields = {
+            k: v for k, v in req.items()
+            if k not in _HOST_BATCH_SKIP and not k.startswith("_")
+        }
+        if not update_fields:
+            return make_response(data={})
+        update_fields["last_time"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        conn = get_db_connection()
+        if conn is None:
+            return make_response(result=False, code=500, message="数据库连接失败")
+        conn["cc_HostBase"].update_many(
+            {"bk_host_id": {"$in": ids}}, {"$set": update_fields}
+        )
+        return make_response(data={})
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return make_response(result=False, code=500, message=str(e))
+
+
+@admin_bp.route('/api/v3/hosts/batch', methods=['DELETE'])
+@admin_bp.route('/hosts/batch', methods=['DELETE'])
+def delete_host_batch():
+    """批量删除主机（对齐 DELETE /hosts/batch）。
+
+    前端 body: {data: {bk_host_id: "1,2,3", bk_supplier_account: "0"}} 或 {bk_host_id: "1,2,3"}。
+    同步清理 cc_HostBase 与 cc_ModuleHostConfig 中的主机记录。
+    """
+    try:
+        req = _parse_json_body_flex()
+        # 兼容 {data:{...}} 包裹结构
+        inner = req.get("data") if isinstance(req.get("data"), dict) else req
+        raw = inner.get("bk_host_id") if isinstance(inner, dict) else None
+        if raw is None:
+            raw = req.get("bk_host_id")
+        ids = _host_ids_from_raw(raw)
+        if not ids:
+            return make_response(result=False, code=500, message="缺少或无效的 bk_host_id")
+        conn = get_db_connection()
+        if conn is None:
+            return make_response(result=False, code=500, message="数据库连接失败")
+        conn["cc_HostBase"].delete_many({"bk_host_id": {"$in": ids}})
+        conn["cc_ModuleHostConfig"].delete_many({"bk_host_id": {"$in": ids}})
+        return make_response(data={})
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return make_response(result=False, code=500, message=str(e))
+
+
 @admin_bp.route('/api/v3/hosts/search/web', methods=['POST'])
 @admin_bp.route('/hosts/search/web', methods=['POST'])
 def hosts_search_web():
@@ -906,13 +1050,171 @@ def hosts_detail(supplier_account, bk_host_id):
         return make_response(result=False, code=500, message=str(e))
 
 
-# 实例关联API
+# ────────────────────── 实例关联 API ──────────────────────
+# 参考 Go: topo_server/service/association.go
+# 存储集合: get_inst_asst_collection_name(obj_id)->cc_InstAsst_0_pub_{obj_id}
+# 查询分表命名对齐 GetObjectInstAsstTableName(objID, "0")
+
+
+# 全量查询实例关联（列表用）—— find/instassociation
+# body: {condition: {bk_obj_id?, bk_inst_id?, ...}, bk_obj_id: "..."}
+# 返回: {info: [...]}
 @admin_bp.route('/api/v3/find/instassociation', methods=['POST'])
 @admin_bp.route('/find/instassociation', methods=['POST'])
 def find_inst_association():
     try:
-        return make_response(data={"info": []})
+        req = _parse_json_body_flex()
+        cond = req.get("condition") or {}
+        obj_id = req.get("bk_obj_id")
+        if not obj_id:
+            return make_response(data={"info": []})
+        collection = get_mongo_collection(get_inst_asst_collection_name(obj_id))
+        docs = list(collection.find(cond, {"_id": 0}))
+        return make_response(data={"info": docs})
     except Exception as e:
+        import traceback; traceback.print_exc()
+        return make_response(result=False, code=500, message=str(e))
+
+
+# 搜索实例关联（查重用）—— search/instance_associations/object/{bk_obj_id}
+# body: {bk_obj_id, conditions: {condition, rules}, page: {start, limit}}
+# 返回: {info: [...]}
+@admin_bp.route('/api/v3/search/instance_associations/object/<obj_id>', methods=['POST'])
+@admin_bp.route('/search/instance_associations/object/<obj_id>', methods=['POST'])
+def search_instance_associations(obj_id):
+    try:
+        req = _parse_json_body_flex()
+        collection = get_mongo_collection(get_inst_asst_collection_name(obj_id))
+        page = req.get("page") or {}
+        start = int(page.get("start", 0))
+        limit = int(page.get("limit", 200))
+        # 解析 conditions.rules 规则树 → mongo query
+        conditions = req.get("conditions") or {}
+        rules = (conditions if isinstance(conditions, dict) else {}).get("rules", [])
+        if not rules:
+            rules = conditions if isinstance(conditions, list) else []
+        mq = _rules_to_mongo(rules)
+        docs = list(collection.find(mq, {"_id": 0}).skip(start).limit(limit))
+        return make_response(data={"info": docs})
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        return make_response(result=False, code=500, message=str(e))
+
+
+# 统计实例关联数（查重用）—— count/instance_associations/object/{bk_obj_id}
+# body: {bk_obj_id, conditions: {condition, rules}}
+# 返回: {count: N}
+@admin_bp.route('/api/v3/count/instance_associations/object/<obj_id>', methods=['POST'])
+@admin_bp.route('/count/instance_associations/object/<obj_id>', methods=['POST'])
+def count_instance_associations(obj_id):
+    try:
+        req = _parse_json_body_flex()
+        collection = get_mongo_collection(get_inst_asst_collection_name(obj_id))
+        conditions = req.get("conditions") or {}
+        rules = (conditions if isinstance(conditions, dict) else {}).get("rules", [])
+        if not rules:
+            rules = conditions if isinstance(conditions, list) else []
+        mq = _rules_to_mongo(rules)
+        mq["bk_obj_id"] = obj_id  # 对齐 Go CountInstanceAssociations 额外加 bk_obj_id
+        cnt = collection.count_documents(mq)
+        return make_response(data={"count": cnt})
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        return make_response(result=False, code=500, message=str(e))
+
+
+# 按 Object 查询实例关联（object-common-inst.js 用）
+# body: {bk_obj_id, conditions: {condition, rules}}
+# 返回: {info: [...]}
+@admin_bp.route('/api/v3/find/instassociation/object/<obj_id>', methods=['POST'])
+@admin_bp.route('/find/instassociation/object/<obj_id>', methods=['POST'])
+def find_inst_association_by_object(obj_id):
+    try:
+        req = _parse_json_body_flex()
+        collection = get_mongo_collection(get_inst_asst_collection_name(obj_id))
+        conditions = req.get("conditions") or {}
+        rules = (conditions if isinstance(conditions, dict) else {}).get("rules", [])
+        if not rules:
+            rules = conditions if isinstance(conditions, list) else []
+        mq = _rules_to_mongo(rules)
+        docs = list(collection.find(mq, {"_id": 0}))
+        return make_response(data={"info": docs})
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        return make_response(result=False, code=500, message=str(e))
+
+
+# 新增实例关联
+# body: {bk_obj_asst_id, bk_inst_id, bk_asst_inst_id}
+# 从 cc_ObjAsst 反查 bk_obj_id / bk_asst_obj_id / bk_asst_id，写入分表 cc_InstAsst_0_pub_{bk_obj_id}
+# 返回: {id, bk_inst_id, bk_asst_inst_id}
+@admin_bp.route('/api/v3/create/instassociation', methods=['POST'])
+@admin_bp.route('/create/instassociation', methods=['POST'])
+def create_inst_association():
+    try:
+        req = _parse_json_body_flex()
+        bk_obj_asst_id = req.get("bk_obj_asst_id")
+        bk_inst_id = req.get("bk_inst_id")
+        bk_asst_inst_id = req.get("bk_asst_inst_id")
+        if not all([bk_obj_asst_id, bk_inst_id is not None, bk_asst_inst_id is not None]):
+            return make_response(result=False, code=500,
+                                 message="bk_obj_asst_id、bk_inst_id、bk_asst_inst_id 均为必填")
+        conn = get_db_connection()
+        if conn is None:
+            return make_response(result=False, code=500, message="数据库连接失败")
+        # 查 cc_ObjAsst 获取关联定义
+        asst_def = conn["cc_ObjAsst"].find_one({"bk_obj_asst_id": bk_obj_asst_id})
+        if not asst_def:
+            return make_response(result=False, code=500,
+                                 message="模型关联定义不存在: " + str(bk_obj_asst_id))
+        bk_obj_id = asst_def.get("bk_obj_id", "")
+        bk_asst_obj_id = asst_def.get("bk_asst_obj_id", "")
+        bk_asst_id_val = asst_def.get("bk_asst_id", "")
+        # 写入分表
+        collection = get_mongo_collection(get_inst_asst_collection_name(bk_obj_id))
+        # 自增 id（分表内 max id + 1）
+        max_doc = collection.find_one(sort=[("id", -1)])
+        new_id = 1 if max_doc is None else (max_doc.get("id") or 0) + 1
+        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        doc = {
+            "id": new_id,
+            "bk_obj_asst_id": bk_obj_asst_id,
+            "bk_inst_id": int(bk_inst_id),
+            "bk_asst_inst_id": int(bk_asst_inst_id),
+            "bk_obj_id": bk_obj_id,
+            "bk_asst_obj_id": bk_asst_obj_id,
+            "bk_asst_id": bk_asst_id_val,
+            "bk_supplier_account": "0",
+            "create_time": now_str,
+            "last_time": now_str,
+            "creator": "admin",
+        }
+        collection.insert_one(doc)
+        return make_response(data={"id": new_id, "bk_inst_id": int(bk_inst_id),
+                                    "bk_asst_inst_id": int(bk_asst_inst_id)})
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        return make_response(result=False, code=500, message=str(e))
+
+
+# 删除实例关联
+# 路径: delete/instassociation/{bk_obj_id}/{association_id}
+# 从分表 cc_InstAsst_0_pub_{bk_obj_id} 删除 id=association_id 的记录
+@admin_bp.route('/api/v3/delete/instassociation/<obj_id>/<asst_id>', methods=['DELETE'])
+@admin_bp.route('/delete/instassociation/<obj_id>/<asst_id>', methods=['DELETE'])
+def delete_inst_association(obj_id, asst_id):
+    try:
+        conn = get_db_connection()
+        if conn is None:
+            return make_response(result=False, code=500, message="数据库连接失败")
+        collection = get_mongo_collection(get_inst_asst_collection_name(obj_id))
+        result = collection.delete_one({"id": int(asst_id)})
+        if result.deleted_count == 0:
+            return make_response(result=False, code=404,
+                                 message="实例关联不存在: id=%s" % asst_id)
+        return make_response(data={})
+    except Exception as e:
+        import traceback; traceback.print_exc()
         return make_response(result=False, code=500, message=str(e))
 
 

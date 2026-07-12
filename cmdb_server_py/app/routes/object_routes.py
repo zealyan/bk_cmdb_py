@@ -1,3 +1,4 @@
+import json
 from datetime import datetime
 from flask import Blueprint, jsonify, request, g
 from app.models.db import db, get_db_connection, get_mongo_collection
@@ -51,6 +52,56 @@ def get_inst_collection_name(obj_id):
         return mapping[obj_id]
     # 通用对象：cc_ObjectBase_0_pub_<obj_id>（如 bk_switch -> cc_ObjectBase_0_pub_bk_switch）
     return f"cc_ObjectBase_0_pub_{obj_id}"
+
+
+def get_inst_id_field(obj_id):
+    """返回某对象实例的主键字段名，对齐 common/metadata.GetInstIDFieldByObjID。
+
+    host 用 bk_host_id、set 用 bk_set_id、module 用 bk_module_id、biz 用 bk_biz_id，
+    其余通用对象（bk_switch 等）用 bk_inst_id。更新/创建时必须按此字段匹配，否则会 404。
+    """
+    mapping = {
+        "bk_biz_set_obj": "bk_biz_set_id",
+        "biz": "bk_biz_id",
+        "set": "bk_set_id",
+        "module": "bk_module_id",
+        "object": "bk_inst_id",
+        "host": "bk_host_id",
+        "process": "bk_process_id",
+        "plat": "bk_cloud_id",
+        "cloud_area": "bk_cloud_id",
+    }
+    return mapping.get(obj_id, "bk_inst_id")
+
+
+def _parse_body():
+    """兼容多种请求体格式（JSON / form / raw），返回 dict。"""
+    if request.is_json:
+        return request.get_json() or {}
+    elif request.form:
+        return request.form.to_dict()
+    elif request.data:
+        try:
+            return json.loads(request.data)
+        except Exception:
+            return {}
+    return {}
+
+
+def normalize_inst_doc(doc, obj_id):
+    """对齐 bk-cmdb：实例搜索/拓扑响应始终附带 bk_inst_id（真实主键字段的别名）。
+
+    前端编辑实例时按 `instState.bk_inst_id` 拼出
+    PUT /update/instance/object/{obj}/inst/{id} 的 URL。host 的真实主键是 bk_host_id、
+    通用对象是 bk_inst_id，若响应里不补 bk_inst_id，前端拿到 undefined → URL 变成
+    inst/undefined → 更新 404。真实 bk-cmdb 的搜索层会补这个字段，这里对齐。
+    """
+    if not doc:
+        return doc
+    id_field = get_inst_id_field(obj_id)
+    if "bk_inst_id" not in doc and id_field in doc:
+        doc["bk_inst_id"] = doc[id_field]
+    return doc
 
 
 def check_user_biz_permission(username, biz_id):
@@ -229,6 +280,79 @@ def find_object_att_group_by_obj(obj_id):
         return make_response(result=False, code=500, message=str(e))
 
 
+def _query_object_attr_by_obj_ids(obj_ids):
+    """根据 bk_obj_id 列表查询 cc_ObjAttDes，并转换为前端所需的字段结构。"""
+    # 前端会自动添加的 ID 属性，避免重复
+    auto_add_id_props = {
+        'biz': 'bk_biz_id',
+        'host': 'bk_host_id',
+        'set': 'bk_set_id',
+        'module': 'bk_module_id',
+        'process': 'bk_process_id',
+        'plat': 'bk_cloud_id',
+        'biz_set': 'bk_biz_set_id'
+    }
+
+    all_attributes = []
+    seen_prop_ids = set()  # 用于去重，避免重复的 bk_property_id
+
+    if not obj_ids:
+        return all_attributes
+
+    collection = get_mongo_collection('cc_ObjAttDes')
+    docs = collection.find({"bk_obj_id": {"$in": obj_ids}})
+    # 简单的排序
+    docs_sorted = sorted(docs, key=lambda x: x.get("bk_property_index", x.get("id", 0)))
+    for doc in docs_sorted:
+        # 转换字段格式，匹配Go原版API返回的字段结构
+        attr = {
+            "id": doc.get("id"),
+            "bk_supplier_account": doc.get("bk_supplier_account", "0"),
+            "bk_obj_id": doc.get("bk_obj_id"),
+            "bk_property_id": doc.get("bk_property_id"),
+            "bk_property_name": doc.get("bk_property_name"),
+            "bk_property_type": doc.get("bk_property_type"),
+            "bk_property_group": doc.get("bk_property_group", "default"),
+            "bk_property_index": doc.get("bk_property_index", 0),
+            "unit": doc.get("unit", ""),
+            "placeholder": doc.get("placeholder", ""),
+            "editable": doc.get("editable", True),
+            "ispre": doc.get("is_pre", False),
+            "isrequired": doc.get("is_required", False),
+            "isreadonly": doc.get("isreadonly", doc.get("is_readonly", False)),
+            "isonly": doc.get("is_only", False),
+            "bk_issystem": doc.get("bk_issystem", doc.get("bk_is_system", False)),
+            "bk_isapi": doc.get("bk_isapi", doc.get("bk_is_api", False)),
+            "option": doc.get("option", ""),
+            "description": doc.get("description", ""),
+            "creator": doc.get("creator", ""),
+            "create_time": doc.get("create_time", ""),
+            "last_time": doc.get("last_time", ""),
+            "bk_property_group_name": doc.get("bk_property_group", "default")
+        }
+        # 确保布尔字段有正确的默认值
+        if attr.get("editable") is None:
+            attr["editable"] = True
+        if attr.get("isreadonly") is None:
+            attr["isreadonly"] = False
+
+        # 去重：只添加没有见过的 bk_property_id
+        prop_id = attr.get("bk_property_id")
+        obj_type = attr.get("bk_obj_id")
+
+        # 避免返回前端会自动添加的 ID 属性
+        if prop_id and prop_id not in seen_prop_ids:
+            # 检查是否是会被前端自动添加的 ID 属性
+            auto_prop = auto_add_id_props.get(obj_type)
+            if auto_prop and prop_id == auto_prop:
+                # 跳过这个属性，因为前端会自动添加
+                continue
+            all_attributes.append(attr)
+            seen_prop_ids.add(prop_id)
+
+    return all_attributes
+
+
 @object_bp.route('/find/objectattr', methods=['POST'])
 def find_object_attr():
     try:
@@ -244,7 +368,7 @@ def find_object_attr():
                 req_data = json.loads(request.data)
             except:
                 req_data = {}
-        
+
         bk_obj_id = req_data.get('bk_obj_id', '')
 
         # 处理 $in 操作符
@@ -255,73 +379,19 @@ def find_object_attr():
         else:
             obj_ids = []
 
-        # 从数据库读取属性数据
-        all_attributes = []
-        seen_prop_ids = set()  # 用于去重，避免重复的 bk_property_id
-        
-        # 前端会自动添加的 ID 属性，避免重复
-        auto_add_id_props = {
-            'biz': 'bk_biz_id',
-            'host': 'bk_host_id',
-            'set': 'bk_set_id',
-            'module': 'bk_module_id',
-            'process': 'bk_process_id',
-            'plat': 'bk_cloud_id',
-            'biz_set': 'bk_biz_set_id'
-        }
-        
-        if obj_ids:
-            collection = get_mongo_collection('cc_ObjAttDes')
-            docs = collection.find({"bk_obj_id": {"$in": obj_ids}})
-            # 简单的排序
-            docs_sorted = sorted(docs, key=lambda x: x.get("bk_property_index", x.get("id", 0)))
-            for doc in docs_sorted:
-                # 转换字段格式，匹配Go原版API返回的字段结构
-                attr = {
-                    "id": doc.get("id"),
-                    "bk_supplier_account": doc.get("bk_supplier_account", "0"),
-                    "bk_obj_id": doc.get("bk_obj_id"),
-                    "bk_property_id": doc.get("bk_property_id"),
-                    "bk_property_name": doc.get("bk_property_name"),
-                    "bk_property_type": doc.get("bk_property_type"),
-                    "bk_property_group": doc.get("bk_property_group", "default"),
-                    "bk_property_index": doc.get("bk_property_index", 0),
-                    "unit": doc.get("unit", ""),
-                    "placeholder": doc.get("placeholder", ""),
-                    "editable": doc.get("editable", True),
-                    "ispre": doc.get("is_pre", False),
-                    "isrequired": doc.get("is_required", False),
-                    "isreadonly": doc.get("isreadonly", doc.get("is_readonly", False)),
-                    "isonly": doc.get("is_only", False),
-                    "bk_issystem": doc.get("bk_issystem", doc.get("bk_is_system", False)),
-                    "bk_isapi": doc.get("bk_isapi", doc.get("bk_is_api", False)),
-                    "option": doc.get("option", ""),
-                    "description": doc.get("description", ""),
-                    "creator": doc.get("creator", ""),
-                    "create_time": doc.get("create_time", ""),
-                    "last_time": doc.get("last_time", ""),
-                    "bk_property_group_name": doc.get("bk_property_group", "default")
-                }
-                # 确保布尔字段有正确的默认值
-                if attr.get("editable") is None:
-                    attr["editable"] = True
-                if attr.get("isreadonly") is None:
-                    attr["isreadonly"] = False
-                
-                # 去重：只添加没有见过的 bk_property_id
-                prop_id = attr.get("bk_property_id")
-                obj_type = attr.get("bk_obj_id")
-                
-                # 避免返回前端会自动添加的 ID 属性
-                if prop_id and prop_id not in seen_prop_ids:
-                    # 检查是否是会被前端自动添加的 ID 属性
-                    auto_prop = auto_add_id_props.get(obj_type)
-                    if auto_prop and prop_id == auto_prop:
-                        # 跳过这个属性，因为前端会自动添加
-                        continue
-                    all_attributes.append(attr)
-                    seen_prop_ids.add(prop_id)
-        
+        all_attributes = _query_object_attr_by_obj_ids(obj_ids)
+        return make_response(data=all_attributes)
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return make_response(result=False, code=500, message=str(e))
+
+
+@object_bp.route('/find/objectattr/<bk_obj_id>', methods=['POST'])
+def find_object_attr_by_obj(bk_obj_id):
+    """兼容前端「高级筛选」按路径参数拉取指定对象属性：find/objectattr/<bk_obj_id>。"""
+    try:
+        all_attributes = _query_object_attr_by_obj_ids([bk_obj_id])
         return make_response(data=all_attributes)
     except Exception as e:
         import traceback
@@ -355,7 +425,9 @@ def find_topo_model_mainline():
         # 注意：bk-cmdb 的主线对象由 bk_obj_id 决定（而非按 bk_classification_id 过滤），
         # host/process 等内置对象的分类在真实 bk-cmdb 中归属 bk_host_manage，
         # 但仍必须出现在业务拓扑主线中。
-        collection = get_mongo_collection('cc_ObjectBase')
+        # 修复：对象模型定义由 initdb 写入 cc_ObjDes（共 11 个），cc_ObjectBase（无 supplier 后缀）
+        # 是空集合；之前误读 cc_ObjectBase 导致业务拓扑主线返回空列表。
+        collection = get_mongo_collection('cc_ObjDes')
         mainline_obj_ids = ['biz', 'set', 'module', 'host', 'process', 'bk_biz_set_obj']
         topo_objects = list(collection.find(
             {"bk_obj_id": {"$in": mainline_obj_ids}},
@@ -374,7 +446,7 @@ def find_topo_model_mainline():
                 "bk_obj_id": obj.get("bk_obj_id"),
                 "bk_obj_name": obj.get("bk_obj_name"),
                 "bk_supplier_account": bk_supplier_account,
-                "is_built-in": obj.get("is_built_in", True),
+                "is_built-in": obj.get("ispre", True),
                 "default": 0,
                 "bk_next_obj": next_obj_map.get(obj.get("bk_obj_id"))
             }
@@ -424,7 +496,9 @@ def find_classification_object():
             }
         
         # 读取所有对象
-        collection_obj = get_mongo_collection('cc_ObjectBase')
+        # 修复：对象模型定义由 initdb 写入 cc_ObjDes（共 11 个模型），cc_ObjectBase 为空集合；
+        # 之前误读 cc_ObjectBase 导致「模型」页（find/classificationobject）返回空。
+        collection_obj = get_mongo_collection('cc_ObjDes')
         docs = collection_obj.find({})
         # 简单的排序
         docs_sorted = sorted(docs, key=lambda x: x.get("id", 0))
@@ -437,7 +511,7 @@ def find_classification_object():
                 "bk_classification_id": doc.get("bk_classification_id"),
                 "bk_supplier_account": doc.get("bk_supplier_account"),
                 "bk_obj_icon": doc.get("bk_obj_icon"),
-                "is_built-in": doc.get("is_built_in"),
+                "is_built-in": doc.get("ispre"),
                 "is_pre": doc.get("is_pre")
             })
         
@@ -812,7 +886,8 @@ def search_instances_by_obj(obj_id):
             instances = []
             for doc in cursor:
                 doc.pop('_id', None)
-                
+                doc = normalize_inst_doc(doc, obj_id)
+
                 if fields and len(fields) > 0:
                     filtered_doc = {}
                     for field in fields:
@@ -1123,50 +1198,143 @@ def find_topoinstnode_host_serviceinst_count(biz_id):
 def create_instance(obj_id):
     """创建对象实例"""
     try:
-        req_data = {}
-        if request.is_json:
-            req_data = request.get_json() or {}
-        elif request.form:
-            req_data = request.form.to_dict()
-        elif request.data:
-            try:
-                import json
-                req_data = json.loads(request.data)
-            except:
-                req_data = {}
-        
-        # 获取实例数据
-        instance_data = req_data
-        
-        # 过滤掉None值，但保留空字符串和0
-        instance_data = {k: v for k, v in instance_data.items() if v is not None}
-        
-        # 获取下一个实例ID
+        req_data = _parse_body()
+
+        # 后端必填校验（兜底，前端 v-validate 已拦截；此处防止绕过）：
+        # 仅校验 cc_ObjAttDes 中 is_required=true 且非「后端自动生成 ID 字段」的属性。
+        id_field = get_inst_id_field(obj_id)
+        auto_id_props = {
+            "bk_biz_id", "bk_set_id", "bk_module_id", "bk_inst_id",
+            "bk_host_id", "bk_process_id", "bk_cloud_id", "bk_biz_set_id",
+        }
+        att_collection = get_mongo_collection('cc_ObjAttDes')
+        required_attrs = list(att_collection.find(
+            {"bk_obj_id": obj_id, "is_required": True},
+            {"bk_property_id": 1, "bk_property_name": 1},
+        ))
+        missing = []
+        for a in required_attrs:
+            pid = a.get("bk_property_id")
+            if pid in auto_id_props:
+                continue
+            val = req_data.get(pid)
+            if val is None or (isinstance(val, str) and val.strip() == ""):
+                missing.append(a.get("bk_property_name") or pid)
+        if missing:
+            return make_response(
+                result=False, code=500,
+                message="以下必填项不能为空: " + "、".join(missing),
+            )
+
+        # 获取实例数据，过滤掉 None 值但保留空字符串和 0
+        instance_data = {k: v for k, v in req_data.items() if v is not None}
+
         collection_name = get_inst_collection_name(obj_id)
         collection = get_mongo_collection(collection_name)
-        
-        # 获取当前最大ID
-        max_doc = collection.find_one(sort=[("bk_inst_id", -1)])
-        next_id = 1 if max_doc is None else max_doc.get("bk_inst_id", 0) + 1
-        
-        # 设置实例ID和基础字段
-        instance_data["bk_inst_id"] = next_id
+
+        # 取当前最大 ID（按该对象真实主键字段），保证与既有数据自增一致
+        max_doc = collection.find_one(sort=[(id_field, -1)])
+        next_id = 1 if max_doc is None else (max_doc.get(id_field) or 0) + 1
+
+        # 用真实主键字段写入（host->bk_host_id，通用对象->bk_inst_id …）
+        instance_data[id_field] = next_id
         instance_data.setdefault("bk_supplier_account", "0")
         instance_data.setdefault("bk_data_status", "active")
         instance_data.setdefault("create_time", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
         instance_data.setdefault("last_time", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
-        
-        # 插入数据库
+
         result = collection.insert_one(instance_data)
-        
+
         if result.inserted_id:
             return make_response(data={
                 "bk_inst_id": next_id,
-                "id": next_id
+                id_field: next_id,
+                "id": next_id,
             })
         else:
             return make_response(result=False, code=500, message="创建实例失败")
-            
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return make_response(result=False, code=500, message=str(e))
+
+
+# 更新实例时禁止被用户覆盖的内部字段
+_INST_INTERNAL_FIELDS = {
+    "bk_inst_id", "bk_supplier_account", "create_time", "last_time", "id", "_id",
+}
+
+
+def _clean_update_fields(info):
+    """从用户提交的字段中剔除内部字段，仅保留业务属性。"""
+    return {k: v for k, v in (info or {}).items()
+            if k not in _INST_INTERNAL_FIELDS and not k.startswith("_")}
+
+
+@object_bp.route('/update/instance/object/<obj_id>/inst/<int:inst_id>', methods=['PUT'])
+def update_instance(obj_id, inst_id):
+    """更新单个对象实例（对齐 PUT /update/instance/object/{bk_obj_id}/inst/{inst_id}）。"""
+    try:
+        req_data = _parse_body()
+        conn = get_db_connection()
+        if conn is None:
+            return make_response(result=False, code=500, message="数据库连接失败")
+
+        collection = get_mongo_collection(get_inst_collection_name(obj_id))
+        id_field = get_inst_id_field(obj_id)
+        update_fields = _clean_update_fields(req_data)
+        if not update_fields:
+            return make_response(result=False, code=500, message="无可更新字段")
+        update_fields["last_time"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        result = collection.update_one({id_field: inst_id}, {"$set": update_fields})
+        if result.matched_count == 0:
+            return make_response(
+                result=False, code=404,
+                message="实例不存在: %s=%s" % (id_field, inst_id),
+            )
+        return make_response(data={})
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return make_response(result=False, code=500, message=str(e))
+
+
+@object_bp.route('/updatemany/instance/object/<obj_id>', methods=['PUT'])
+def update_instances(obj_id):
+    """批量更新对象实例（对齐 PUT /updatemany/instance/object/{bk_obj_id}）。
+
+    前端请求体: {"update":[{"datas":{字段}, "inst_id":N}], "delete":{"inst_ids":[N,...]}}
+    （注意字段名为 datas / inst_ids，与 bk-cmdb v3.10 前端一致）
+    """
+    try:
+        req_data = _parse_body()
+        conn = get_db_connection()
+        if conn is None:
+            return make_response(result=False, code=500, message="数据库连接失败")
+
+        collection = get_mongo_collection(get_inst_collection_name(obj_id))
+        id_field = get_inst_id_field(obj_id)
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        for item in (req_data.get("update") or []):
+            iid = item.get("inst_id")
+            if not iid:
+                return make_response(result=False, code=500, message="update 项缺少 inst_id")
+            update_fields = _clean_update_fields(item.get("datas"))
+            if not update_fields:
+                continue
+            update_fields["last_time"] = now
+            collection.update_one({id_field: int(iid)}, {"$set": update_fields})
+
+        # 可选删除分支
+        delete = req_data.get("delete") or {}
+        del_ids = delete.get("inst_ids") or delete.get("inst_id") or []
+        if del_ids:
+            collection.delete_many({id_field: {"$in": [int(x) for x in del_ids]}})
+
+        return make_response(data={})
     except Exception as e:
         import traceback
         traceback.print_exc()

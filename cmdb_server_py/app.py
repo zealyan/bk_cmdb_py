@@ -27,6 +27,10 @@ CORS(app, supports_credentials=True, origins=[
 app.register_blueprint(user_bp, url_prefix='/api/v3')
 app.register_blueprint(biz_bp, url_prefix='/api/v3')
 app.register_blueprint(admin_bp, url_prefix='/api/v3')
+# 注意：本仓库的 prod_bin 前端实际调用 /api/v3/find/...、/api/v3/usercustom/... 等
+# （对象路由不带 /object 前缀），因此 object_bp 前缀必须为 /api/v3。
+# 模型/资源“无数据”的根因是路由内部读错了集合（cc_ObjectBase→cc_ObjDes），
+# 不是路径前缀问题——切勿改成 /api/v3/object，否则前端所有对象接口会 404。
 app.register_blueprint(object_bp, url_prefix='/api/v3')
 app.register_blueprint(auth_bp, url_prefix='/api/v3')
 app.register_blueprint(set_bp, url_prefix='/api/v3')
