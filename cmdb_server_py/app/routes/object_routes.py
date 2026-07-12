@@ -1,6 +1,7 @@
 from datetime import datetime
 from flask import Blueprint, jsonify, request, g
 from app.models.db import db, get_db_connection, get_mongo_collection
+from app.config import Config
 
 object_bp = Blueprint('object', __name__)
 
@@ -9,16 +10,47 @@ PERMISSION_DENIED_CODE = 9900403
 
 
 def make_response(result=True, code=0, message="success", data=None, **kwargs):
+    # bk-cmdb 前端统一以 bk_error_code===0 判定请求成功并取 data；
+    # 缺失该字段会让所有列表页静默无数据，故与 result/code 同时下发。
+    if result and code == 0:
+        bk_error_code, bk_error_msg = 0, ""
+    else:
+        bk_error_code = code if code != 0 else 500
+        bk_error_msg = message
     response = {
+        "bk_error_code": bk_error_code,
+        "bk_error_msg": bk_error_msg,
         "result": result,
         "code": code,
-        "message": message
+        "message": message,
     }
     if data is not None:
         response["data"] = data
     # 添加额外的字段到响应顶层
     response.update(kwargs)
     return jsonify(response)
+
+
+def get_inst_collection_name(obj_id):
+    """按 bk-cmdb common/tablenames.go 的 GetInstTableName 规则返回实例集合名。
+
+    内置对象使用独立集合；通用对象（含 bk_switch/bk_router/bk_load_balance/bk_firewall、
+    bk_biz_set_obj 等）使用分片集合 cc_ObjectBase_<supplier>_pub_<obj_id>（initdb 默认 supplier=0）。
+    """
+    mapping = {
+        "biz": "cc_ApplicationBase",
+        "bk_biz_set_obj": "cc_BizSetBase",
+        "set": "cc_SetBase",
+        "module": "cc_ModuleBase",
+        "host": "cc_HostBase",
+        "process": "cc_Process",
+        "plat": "cc_PlatBase",
+        "cloud_area": "cc_PlatBase",
+    }
+    if obj_id in mapping:
+        return mapping[obj_id]
+    # 通用对象：cc_ObjectBase_0_pub_<obj_id>（如 bk_switch -> cc_ObjectBase_0_pub_bk_switch）
+    return f"cc_ObjectBase_0_pub_{obj_id}"
 
 
 def check_user_biz_permission(username, biz_id):
@@ -35,6 +67,10 @@ def check_user_biz_permission(username, biz_id):
     if conn is None:
         return False
     
+    # 内置超级管理员直接放行
+    if Config.is_superuser(username):
+        return True
+
     # 检查用户是否有该业务的访问权限
     user_biz = conn.user_business.find_one({
         'username': username,
@@ -57,6 +93,11 @@ def get_user_accessible_biz_ids(username):
     if conn is None:
         return []
     
+    # 内置超级管理员可访问全部业务
+    if Config.is_superuser(username):
+        return [b['bk_biz_id'] for b in conn.cc_ApplicationBase.find(
+            {}, {'bk_biz_id': 1, '_id': 0})]
+
     user_biz_list = list(conn.user_business.find(
         {'username': username},
         {'bk_biz_id': 1, '_id': 0}
@@ -65,7 +106,6 @@ def get_user_accessible_biz_ids(username):
     return [ub['bk_biz_id'] for ub in user_biz_list]
 
 
-@object_bp.route('/api/v3/find/objectclassification', methods=['POST'])
 @object_bp.route('/find/objectclassification', methods=['POST'])
 def find_object_classification():
     try:
@@ -88,7 +128,6 @@ def find_object_classification():
         return make_response(result=False, code=500, message=str(e))
 
 
-@object_bp.route('/api/v3/find/objectassociation', methods=['POST'])
 @object_bp.route('/find/objectassociation', methods=['POST'])
 def find_object_association():
     try:
@@ -138,7 +177,6 @@ def find_object_association():
         return make_response(result=False, code=500, message=str(e))
 
 
-@object_bp.route('/api/v3/find/objectattgroup', methods=['POST'])
 @object_bp.route('/find/objectattgroup', methods=['POST'])
 def find_object_att_group():
     try:
@@ -147,7 +185,7 @@ def find_object_att_group():
         if conn is None:
             return make_response(result=False, code=500, message="数据库连接失败")
         
-        docs = conn.cc_ObjAttGroup.find({}, {'_id': 0})
+        docs = conn.cc_PropertyGroup.find({}, {'_id': 0})
         groups = []
         seen_group_ids = set()
         
@@ -165,11 +203,11 @@ def find_object_att_group():
         return make_response(result=False, code=500, message=str(e))
 
 
-@object_bp.route('/api/v3/find/objectattgroup/object/<obj_id>', methods=['POST'])
+@object_bp.route('/find/objectattgroup/object/<obj_id>', methods=['POST'])
 def find_object_att_group_by_obj(obj_id):
     try:
         groups = []
-        collection = get_mongo_collection('cc_ObjAttGroup')
+        collection = get_mongo_collection('cc_PropertyGroup')
         docs = collection.find({"bk_obj_id": obj_id})
         # 简单的排序
         docs_sorted = sorted(docs, key=lambda x: x.get("id", 0))
@@ -191,7 +229,7 @@ def find_object_att_group_by_obj(obj_id):
         return make_response(result=False, code=500, message=str(e))
 
 
-@object_bp.route('/api/v3/find/objectattr', methods=['POST'])
+@object_bp.route('/find/objectattr', methods=['POST'])
 def find_object_attr():
     try:
         # 兼容多种请求数据格式
@@ -291,7 +329,6 @@ def find_object_attr():
         return make_response(result=False, code=500, message=str(e))
 
 
-@object_bp.route('/api/v3/find/topomodelmainline', methods=['POST'])
 @object_bp.route('/find/topomodelmainline', methods=['POST'])
 def find_topo_model_mainline():
     """获取拓扑主线模型"""
@@ -314,10 +351,14 @@ def find_topo_model_mainline():
         # 查询业务拓扑分类下的所有对象模型（业务、集群、模块）
         topo_data = []
         
-        # 查询业务拓扑分类下的对象定义
+        # 查询业务拓扑主线对象定义。
+        # 注意：bk-cmdb 的主线对象由 bk_obj_id 决定（而非按 bk_classification_id 过滤），
+        # host/process 等内置对象的分类在真实 bk-cmdb 中归属 bk_host_manage，
+        # 但仍必须出现在业务拓扑主线中。
         collection = get_mongo_collection('cc_ObjectBase')
+        mainline_obj_ids = ['biz', 'set', 'module', 'host', 'process', 'bk_biz_set_obj']
         topo_objects = list(collection.find(
-            {"bk_classification_id": "bk_biz_topo"},
+            {"bk_obj_id": {"$in": mainline_obj_ids}},
             {'_id': 0}
         ))
         
@@ -345,7 +386,6 @@ def find_topo_model_mainline():
         return make_response(result=False, code=500, message=str(e))
 
 
-@object_bp.route('/api/v3/find/classificationobject', methods=['POST'])
 @object_bp.route('/find/classificationobject', methods=['POST'])
 def find_classification_object():
     """获取模型分类"""
@@ -429,7 +469,6 @@ def find_classification_object():
         return make_response(result=False, code=500, message=str(e))
 
 
-@object_bp.route('/api/v3/topoinstchild/object/<obj_id>/biz/<int:biz_id>/inst/<int:inst_id>', methods=['GET'])
 @object_bp.route('/topoinstchild/object/<obj_id>/biz/<int:biz_id>/inst/<int:inst_id>', methods=['GET'])
 def get_inst_topo_child(obj_id, biz_id, inst_id):
     """获取子节点实例"""
@@ -478,21 +517,106 @@ def get_inst_topo_child(obj_id, biz_id, inst_id):
         return make_response(result=False, code=500, message=str(e))
 
 
-@object_bp.route('/api/v3/find/topopath/biz/<int:biz_id>', methods=['POST'])
 @object_bp.route('/find/topopath/biz/<int:biz_id>', methods=['POST'])
 def find_topo_path(biz_id):
-    """获取拓扑路径"""
+    """获取拓扑路径
+
+    根据请求体中的 topo_nodes 返回每个节点从根业务到自身的完整路径。
+    请求示例：{"topo_nodes":[{"bk_obj_id":"module","bk_inst_id":1}]}
+    响应示例：{"nodes":[{"topo_node":{"bk_obj_id":"module","bk_inst_id":1,...},
+                            "topo_path":[{"bk_obj_id":"biz",...},{bk_obj_id":"set",...},{bk_obj_id":"module",...}]}]}
+    """
     try:
+        conn = get_db_connection()
+        if conn is None:
+            return make_response(result=False, code=500, message="数据库连接失败")
+
         req_data = request.get_json() or {}
-        # 返回从根节点到目标节点的路径
-        return make_response(data=[])
+        topo_nodes = req_data.get("topo_nodes", []) or []
+        if not isinstance(topo_nodes, list):
+            topo_nodes = []
+
+        nodes = []
+        for node in topo_nodes:
+            obj_id = node.get("bk_obj_id")
+            inst_id = node.get("bk_inst_id")
+            if not obj_id or inst_id is None:
+                continue
+
+            path = []
+            topo_node = None
+
+            if obj_id == "biz":
+                biz = conn.cc_ApplicationBase.find_one({"bk_biz_id": inst_id}, {"_id": 0})
+                if biz:
+                    topo_node = {"bk_obj_id": "biz", "bk_inst_id": inst_id, "bk_inst_name": biz.get("bk_biz_name", "")}
+                    path = [topo_node]
+
+            elif obj_id == "set":
+                set_doc = conn.cc_SetBase.find_one({"bk_set_id": inst_id, "bk_data_status": {"$ne": "disabled"}}, {"_id": 0})
+                if set_doc:
+                    biz_id_inner = set_doc.get("bk_biz_id")
+                    biz = conn.cc_ApplicationBase.find_one({"bk_biz_id": biz_id_inner}, {"_id": 0}) if biz_id_inner else None
+                    biz_node = {"bk_obj_id": "biz", "bk_inst_id": biz_id_inner, "bk_inst_name": biz.get("bk_biz_name", "")} if biz else None
+                    set_node = {"bk_obj_id": "set", "bk_inst_id": inst_id, "bk_inst_name": set_doc.get("bk_set_name", "")}
+                    topo_node = set_node
+                    path = [n for n in [biz_node, set_node] if n]
+
+            elif obj_id == "module":
+                module = conn.cc_ModuleBase.find_one({"bk_module_id": inst_id, "bk_data_status": {"$ne": "disabled"}}, {"_id": 0})
+                if module:
+                    set_id = module.get("bk_set_id")
+                    biz_id_inner = module.get("bk_biz_id")
+                    if not biz_id_inner and set_id:
+                        set_doc = conn.cc_SetBase.find_one({"bk_set_id": set_id}, {"_id": 0, "bk_biz_id": 1})
+                        if set_doc:
+                            biz_id_inner = set_doc.get("bk_biz_id")
+                    biz = conn.cc_ApplicationBase.find_one({"bk_biz_id": biz_id_inner}, {"_id": 0}) if biz_id_inner else None
+                    set_doc = conn.cc_SetBase.find_one({"bk_set_id": set_id, "bk_data_status": {"$ne": "disabled"}}, {"_id": 0}) if set_id else None
+
+                    biz_node = {"bk_obj_id": "biz", "bk_inst_id": biz_id_inner, "bk_inst_name": biz.get("bk_biz_name", "")} if biz else None
+                    set_node = {"bk_obj_id": "set", "bk_inst_id": set_id, "bk_inst_name": set_doc.get("bk_set_name", "")} if set_doc else None
+                    module_node = {"bk_obj_id": "module", "bk_inst_id": inst_id, "bk_inst_name": module.get("bk_module_name", "")}
+                    topo_node = module_node
+                    path = [n for n in [biz_node, set_node, module_node] if n]
+
+            elif obj_id == "host":
+                # 主机可能属于多个模块，返回其每个模块路径
+                relations = list(conn.cc_ModuleHostConfig.find({"bk_host_id": inst_id}, {"_id": 0, "bk_biz_id": 1, "bk_set_id": 1, "bk_module_id": 1}))
+                if relations:
+                    # 取第一个关系构建路径
+                    rel = relations[0]
+                    biz_id_inner = rel.get("bk_biz_id")
+                    set_id = rel.get("bk_set_id")
+                    module_id = rel.get("bk_module_id")
+                    host_doc = conn.cc_HostBase.find_one({"bk_host_id": inst_id}, {"_id": 0, "bk_host_innerip": 1, "bk_host_name": 1})
+                    host_name = host_doc.get("bk_host_innerip") or host_doc.get("bk_host_name") if host_doc else ""
+                    host_name = host_name.split(",")[0] if isinstance(host_name, str) and "," in host_name else host_name
+
+                    biz = conn.cc_ApplicationBase.find_one({"bk_biz_id": biz_id_inner}, {"_id": 0}) if biz_id_inner else None
+                    set_doc = conn.cc_SetBase.find_one({"bk_set_id": set_id, "bk_data_status": {"$ne": "disabled"}}, {"_id": 0}) if set_id else None
+                    module = conn.cc_ModuleBase.find_one({"bk_module_id": module_id, "bk_data_status": {"$ne": "disabled"}}, {"_id": 0}) if module_id else None
+
+                    biz_node = {"bk_obj_id": "biz", "bk_inst_id": biz_id_inner, "bk_inst_name": biz.get("bk_biz_name", "")} if biz else None
+                    set_node = {"bk_obj_id": "set", "bk_inst_id": set_id, "bk_inst_name": set_doc.get("bk_set_name", "")} if set_doc else None
+                    module_node = {"bk_obj_id": "module", "bk_inst_id": module_id, "bk_inst_name": module.get("bk_module_name", "")} if module else None
+                    host_node = {"bk_obj_id": "host", "bk_inst_id": inst_id, "bk_inst_name": host_name}
+                    topo_node = host_node
+                    path = [n for n in [biz_node, set_node, module_node, host_node] if n]
+
+            if topo_node and path:
+                nodes.append({
+                    "topo_node": topo_node,
+                    "topo_path": path
+                })
+
+        return make_response(data={"nodes": nodes})
     except Exception as e:
         import traceback
         traceback.print_exc()
         return make_response(result=False, code=500, message=str(e))
 
 
-@object_bp.route('/api/v3/find/biz_set/topo_path', methods=['POST'])
 @object_bp.route('/find/biz_set/topo_path', methods=['POST'])
 def find_biz_set_topo_path():
     """获取业务集拓扑路径"""
@@ -520,32 +644,76 @@ def find_biz_set_topo_path():
         return make_response(result=False, code=500, message=str(e))
 
 
-@object_bp.route('/api/v3/topo/internal/<supplier_account>/<int:bk_biz_id>/with_statistics', methods=['GET'])
 @object_bp.route('/topo/internal/<supplier_account>/<int:bk_biz_id>/with_statistics', methods=['GET'])
 def topo_internal_with_statistics_new(supplier_account, bk_biz_id):
-    """获取内部拓扑及统计信息（新参数格式）"""
+    """获取内部拓扑（空闲机池）及统计信息。
+
+    复刻原 bk-cmdb 语义：空闲机池是 cc_SetBase 中 bk_default=1（或名为“空闲机池”）的真实集群，
+    其下挂 空闲机/故障机/待回收 等默认模块。前端业务拓扑组件会把本接口结果以 is_idle_set 前置
+    到业务拓扑 sets 列表中（l.unshift(d)），因此业务拓扑接口必须排除空闲机池，避免重复。
+    """
     try:
-        # 返回空闲池拓扑结构
+        conn = get_db_connection()
+        if conn is None:
+            return make_response(result=False, code=500, message="数据库连接失败")
+
+        # 空闲机池模块的 default 值映射（按名称兜底，因部分数据缺失 bk_default 字段）
+        idle_module_default = {"空闲机": 1, "故障机": 2, "待回收": 3}
+
+        # 定位空闲机池集群：优先 bk_default==1，其次按名称“空闲机池”
+        idle_set = conn.cc_SetBase.find_one({
+            "bk_biz_id": bk_biz_id,
+            "bk_data_status": {"$ne": "disabled"},
+            "$or": [{"bk_default": 1}, {"bk_set_name": "空闲机池"}]
+        })
+        if not idle_set:
+            idle_set = conn.cc_SetBase.find_one({
+                "bk_biz_id": bk_biz_id,
+                "bk_data_status": {"$ne": "disabled"},
+                "bk_set_name": {"$regex": "空闲机池"}
+            })
+
+        if not idle_set:
+            # 退化：仍返回结构合法的空闲机池节点，避免前端解构报错
+            return make_response(data={
+                "bk_set_id": 0,
+                "bk_set_name": "空闲机池",
+                "default": 1,
+                "module": []
+            })
+
+        idle_set_id = idle_set.get("bk_set_id")
+        host_relations = list(conn.cc_ModuleHostConfig.find({
+            "bk_biz_id": bk_biz_id, "bk_set_id": idle_set_id
+        }))
+
+        modules = list(conn.cc_ModuleBase.find({
+            "bk_biz_id": bk_biz_id,
+            "bk_set_id": idle_set_id,
+            "bk_data_status": {"$ne": "disabled"}
+        }))
+
+        module_list = []
+        for m in modules:
+            mid = m.get("bk_module_id")
+            mname = m.get("bk_module_name", "")
+            default = m.get("bk_default")
+            if default is None:
+                default = idle_module_default.get(mname, 0)
+            host_count = len([r for r in host_relations if r.get("bk_module_id") == mid])
+            module_list.append({
+                "bk_module_id": mid,
+                "bk_module_name": mname,
+                "default": default,
+                "host_count": host_count,
+                "service_instance_count": 0
+            })
+
         result = {
-            "bk_set_id": 0,
-            "bk_set_name": "空闲机池",
+            "bk_set_id": idle_set_id,
+            "bk_set_name": idle_set.get("bk_set_name", "空闲机池"),
             "default": 1,
-            "module": [
-                {
-                    "bk_module_id": 0,
-                    "bk_module_name": "空闲机",
-                    "default": 1,
-                    "host_count": 0,
-                    "service_instance_count": 0
-                },
-                {
-                    "bk_module_id": 1,
-                    "bk_module_name": "故障机",
-                    "default": 2,
-                    "host_count": 0,
-                    "service_instance_count": 0
-                }
-            ]
+            "module": module_list
         }
         return make_response(data=result)
     except Exception as e:
@@ -554,7 +722,6 @@ def topo_internal_with_statistics_new(supplier_account, bk_biz_id):
         return make_response(result=False, code=500, message=str(e))
 
 
-@object_bp.route('/api/v3/object/count', methods=['POST'])
 @object_bp.route('/object/count', methods=['POST'])
 def object_count():
     """批量获取对象实例数量"""
@@ -579,31 +746,10 @@ def object_count():
         for obj_id in obj_ids:
             count = 0
             try:
-                if obj_id == 'biz':
-                    collection = get_mongo_collection('cc_ApplicationBase')
-                    count = collection.count_documents({"bk_data_status": {"$ne": "disabled"}})
-                elif obj_id == 'host':
-                    collection = get_mongo_collection('cc_HostBase')
-                    count = collection.count_documents({})
-                elif obj_id == 'set':
-                    collection = get_mongo_collection('cc_SetBase')
-                    count = collection.count_documents({})
-                elif obj_id == 'module':
-                    collection = get_mongo_collection('cc_ModuleBase')
-                    count = collection.count_documents({})
-                elif obj_id == 'biz_set':
-                    count = 0
-                elif obj_id == 'cloud_area':
-                    collection = get_mongo_collection('cc_PlatBase')
-                    count = collection.count_documents({})
-                elif obj_id == 'process':
-                    count = 0
-                elif obj_id in ['bk_switch', 'bk_router', 'bk_load_balance', 'bk_firewall']:
-                    inst_collection_name = f"cc_InstBase_{obj_id}"
-                    collection = get_mongo_collection(inst_collection_name)
-                    count = collection.count_documents({})
-                else:
-                    count = 0
+                collection_name = get_inst_collection_name(obj_id)
+                query = {"bk_data_status": {"$ne": "disabled"}} if obj_id == 'biz' else {}
+                collection = get_mongo_collection(collection_name)
+                count = collection.count_documents(query)
             except Exception as e:
                 print(f"统计 {obj_id} 实例数量失败: {e}")
                 count = 0
@@ -621,7 +767,6 @@ def object_count():
         return make_response(result=False, code=500, message=str(e))
 
 
-@object_bp.route('/api/v3/search/instances/object/<obj_id>', methods=['POST'])
 @object_bp.route('/search/instances/object/<obj_id>', methods=['POST'])
 def search_instances_by_obj(obj_id):
     """搜索特定对象的实例列表"""
@@ -647,27 +792,10 @@ def search_instances_by_obj(obj_id):
         sort = page.get('sort', 'bk_inst_id')
         
         try:
-            if obj_id == 'biz':
-                collection_name = 'cc_ApplicationBase'
-                query = conditions if conditions else {"bk_data_status": {"$ne": "disabled"}}
-            elif obj_id == 'set':
-                collection_name = 'cc_SetBase'
-                query = conditions if conditions else {}
-            elif obj_id == 'module':
-                collection_name = 'cc_ModuleBase'
-                query = conditions if conditions else {}
-            elif obj_id == 'host':
-                collection_name = 'cc_HostBase'
-                query = conditions if conditions else {}
-            elif obj_id == 'cloud_area':
-                collection_name = 'cc_PlatBase'
-                query = conditions if conditions else {}
-            else:
-                collection_name = f"cc_InstBase_{obj_id}"
-                query = conditions if conditions else {}
+            collection_name = get_inst_collection_name(obj_id)
+            query = conditions if conditions else {}
             
             collection = get_mongo_collection(collection_name)
-            
             cursor = collection.find(query)
             
             if sort:
@@ -710,7 +838,6 @@ def search_instances_by_obj(obj_id):
         return make_response(result=False, code=500, message=str(e))
 
 
-@object_bp.route('/api/v3/count/instances/object/<obj_id>', methods=['POST'])
 @object_bp.route('/count/instances/object/<obj_id>', methods=['POST'])
 def count_instances_by_obj(obj_id):
     """统计特定对象的实例数量"""
@@ -731,38 +858,13 @@ def count_instances_by_obj(obj_id):
         
         count = 0
         try:
-            if obj_id == 'biz':
-                collection = get_mongo_collection('cc_ApplicationBase')
-                query = {}
-                if conditions:
-                    query = conditions
-                else:
-                    query = {"bk_data_status": {"$ne": "disabled"}}
-                count = collection.count_documents(query)
-            elif obj_id == 'set':
-                collection = get_mongo_collection('cc_SetBase')
-                count = collection.count_documents(conditions if conditions else {})
-            elif obj_id == 'module':
-                collection = get_mongo_collection('cc_ModuleBase')
-                count = collection.count_documents(conditions if conditions else {})
-            elif obj_id == 'host':
-                collection = get_mongo_collection('cc_HostBase')
-                count = collection.count_documents(conditions if conditions else {})
-            elif obj_id == 'biz_set':
-                count = 0
-            elif obj_id == 'cloud_area':
-                collection = get_mongo_collection('cc_PlatBase')
-                count = collection.count_documents(conditions if conditions else {})
-            elif obj_id == 'process':
-                count = 0
-            elif obj_id in ['bk_switch', 'bk_router', 'bk_load_balance', 'bk_firewall']:
-                # 网络设备实例数量统计
-                # 查找对应的实例集合
-                inst_collection_name = f"cc_InstBase_{obj_id}"
-                collection = get_mongo_collection(inst_collection_name)
-                count = collection.count_documents(conditions if conditions else {})
-            else:
-                count = 0
+            collection_name = get_inst_collection_name(obj_id)
+            query = conditions if conditions else {}
+            # biz 默认排除 disabled
+            if obj_id == 'biz' and not conditions:
+                query = {"bk_data_status": {"$ne": "disabled"}}
+            collection = get_mongo_collection(collection_name)
+            count = collection.count_documents(query)
         except Exception as e:
             print(f"统计 {obj_id} 实例数量失败: {e}")
             count = 0
@@ -774,7 +876,6 @@ def count_instances_by_obj(obj_id):
         return make_response(result=False, code=500, message=str(e))
 
 
-@object_bp.route('/api/v3/find/topoinst_with_statistics/biz/<int:bk_biz_id>', methods=['POST'])
 @object_bp.route('/find/topoinst_with_statistics/biz/<int:bk_biz_id>', methods=['POST'])
 def find_topo_inst_with_statistics(bk_biz_id):
     """获取业务拓扑实例及统计信息"""
@@ -813,24 +914,29 @@ def find_topo_inst_with_statistics(bk_biz_id):
             # 如果没有任何业务，返回空结构
             return make_response(data=[])
         
-        # 查询主机-模块关系
-        host_relations = list(conn.cc_HostModuleRelation.find({"bk_biz_id": business.get("bk_biz_id")}))
-        
+        # 查询主机-模块关系（含空闲机池，用于业务节点总数统计）
+        host_relations = list(conn.cc_ModuleHostConfig.find({"bk_biz_id": business.get("bk_biz_id")}))
+
         # 查询该业务下的所有集群
         sets = list(conn.cc_SetBase.find({"bk_biz_id": business.get("bk_biz_id"), "bk_data_status": {"$ne": "disabled"}}))
-        
+
         # 查询该业务下的所有模块
         modules = list(conn.cc_ModuleBase.find({"bk_biz_id": business.get("bk_biz_id"), "bk_data_status": {"$ne": "disabled"}}))
-        
-        # 构建集群节点
+
+        # 判断是否为空闲机池：bk_default==1 或名为“空闲机池”
+        # 业务拓扑接口须排除空闲机池，否则会与 /topo/internal 接口返回并前置的空闲机池重复。
+        def _is_idle_pool(s):
+            return s.get("bk_default") == 1 or s.get("bk_set_name") == "空闲机池"
+
+        # 构建集群节点（排除空闲机池）
         set_nodes = []
-        total_host_count = 0
-        
         for s in sets:
+            if _is_idle_pool(s):
+                continue
             set_id = s.get("bk_set_id")
             # 查找该集群下的所有模块
             set_modules = [m for m in modules if m.get("bk_set_id") == set_id]
-            
+
             # 构建模块节点
             module_nodes = []
             set_host_count = 0
@@ -840,7 +946,7 @@ def find_topo_inst_with_statistics(bk_biz_id):
                 module_hosts = [r for r in host_relations if r.get("bk_module_id") == module_id]
                 host_count = len(module_hosts)
                 set_host_count += host_count
-                
+
                 module_node = {
                     "bk_obj_id": "module",
                     "bk_obj_name": "模块",
@@ -852,21 +958,23 @@ def find_topo_inst_with_statistics(bk_biz_id):
                     "service_instance_count": 0
                 }
                 module_nodes.append(module_node)
-            
+
             # 构建集群节点
-            total_host_count += set_host_count
             set_node = {
                 "bk_obj_id": "set",
                 "bk_obj_name": "集群",
                 "bk_inst_id": s.get("bk_set_id"),
                 "bk_inst_name": s.get("bk_set_name"),
-                "default": 0,
+                "default": s.get("bk_default", 0),
                 "child": module_nodes,
                 "host_count": set_host_count,
                 "service_instance_count": 0
             }
             set_nodes.append(set_node)
-        
+
+        # 业务节点主机总数 = 该业务下全部主机（含空闲机池），符合 bk-cmdb 语义
+        total_host_count = len(host_relations)
+
         # 构建业务拓扑结构
         biz_node = {
             "bk_obj_id": "biz",
@@ -878,7 +986,7 @@ def find_topo_inst_with_statistics(bk_biz_id):
             "host_count": total_host_count,
             "service_instance_count": 0
         }
-        
+
         return make_response(data=[biz_node])
     except Exception as e:
         import traceback
@@ -891,7 +999,69 @@ def find_topo_inst_with_statistics(bk_biz_id):
 
 
 
-@object_bp.route('/api/v3/find/topoinstnode/host_serviceinst_count/<int:biz_id>', methods=['POST'])
+@object_bp.route('/find/topoinst/bk_biz_id/<int:bk_biz_id>/host/<int:bk_host_id>', methods=['POST'])
+def find_topoinst_by_host(bk_biz_id, bk_host_id):
+    """主机所属拓扑路径：bk_biz_id -> set -> module -> host。
+
+    对应前端「主机详情 / 所属拓扑」页签请求的
+    POST /find/topoinst/bk_biz_id/{bk_biz_id}/host/{bk_host_id}，
+    此前无对应路由（兜底返回空），导致所属拓扑为空。复刻 bk-cmdb 返回单条拓扑路径。
+    """
+    try:
+        conn = get_db_connection()
+        if conn is None:
+            return make_response(result=False, code=500, message="数据库连接失败")
+
+        rel = conn.cc_ModuleHostConfig.find_one({"bk_biz_id": bk_biz_id, "bk_host_id": bk_host_id})
+        if not rel:
+            return make_response(data=[])
+
+        set_id = rel.get("bk_set_id")
+        module_id = rel.get("bk_module_id")
+
+        biz = conn.cc_ApplicationBase.find_one({"bk_biz_id": bk_biz_id}) or {}
+        set_doc = conn.cc_SetBase.find_one({"bk_set_id": set_id}) or {}
+        module_doc = conn.cc_ModuleBase.find_one({"bk_module_id": module_id}) or {}
+        host_doc = conn.cc_HostBase.find_one({"bk_host_id": bk_host_id}) or {}
+
+        host_node = {
+            "bk_obj_id": "host",
+            "bk_inst_id": bk_host_id,
+            "bk_inst_name": host_doc.get("bk_host_name", ""),
+            "host_count": 1,
+            "child": []
+        }
+        module_node = {
+            "bk_obj_id": "module",
+            "bk_inst_id": module_id,
+            "bk_inst_name": module_doc.get("bk_module_name", ""),
+            "default": module_doc.get("bk_default", 0),
+            "host_count": 1,
+            "child": [host_node]
+        }
+        set_node = {
+            "bk_obj_id": "set",
+            "bk_inst_id": set_id,
+            "bk_inst_name": set_doc.get("bk_set_name", ""),
+            "default": set_doc.get("bk_default", 0),
+            "host_count": 1,
+            "child": [module_node]
+        }
+        biz_node = {
+            "bk_obj_id": "biz",
+            "bk_inst_id": bk_biz_id,
+            "bk_inst_name": biz.get("bk_biz_name", ""),
+            "default": biz.get("bk_default", 0),
+            "host_count": 1,
+            "child": [set_node]
+        }
+        return make_response(data=[biz_node])
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return make_response(result=False, code=500, message=str(e))
+
+
 @object_bp.route('/find/topoinstnode/host_serviceinst_count/<int:biz_id>', methods=['POST'])
 def find_topoinstnode_host_serviceinst_count(biz_id):
     """获取拓扑节点的主机和服务实例统计信息"""
@@ -916,7 +1086,7 @@ def find_topoinstnode_host_serviceinst_count(biz_id):
         conditions = req_data.get('condition', [])
         
         # 查询主机-模块关系
-        host_relations = list(conn.cc_HostModuleRelation.find({"bk_biz_id": biz_id}))
+        host_relations = list(conn.cc_ModuleHostConfig.find({"bk_biz_id": biz_id}))
         
         # 为每个节点返回统计数据
         result = []
@@ -949,7 +1119,6 @@ def find_topoinstnode_host_serviceinst_count(biz_id):
         return make_response(result=False, code=500, message=str(e))
 
 
-@object_bp.route('/api/v3/create/instance/object/<obj_id>', methods=['POST'])
 @object_bp.route('/create/instance/object/<obj_id>', methods=['POST'])
 def create_instance(obj_id):
     """创建对象实例"""
@@ -973,7 +1142,7 @@ def create_instance(obj_id):
         instance_data = {k: v for k, v in instance_data.items() if v is not None}
         
         # 获取下一个实例ID
-        collection_name = f"cc_InstBase_{obj_id}"
+        collection_name = get_inst_collection_name(obj_id)
         collection = get_mongo_collection(collection_name)
         
         # 获取当前最大ID
@@ -1006,7 +1175,6 @@ def create_instance(obj_id):
 
 
 
-@object_bp.route('/api/v3/find/topoinst/biz/<int:bk_biz_id>', methods=['POST'])
 @object_bp.route('/find/topoinst/biz/<int:bk_biz_id>', methods=['POST'])
 def find_business_topo_inst(bk_biz_id):
     """搜索业务拓扑实例"""
@@ -1097,7 +1265,6 @@ def find_business_topo_inst(bk_biz_id):
         return make_response(result=False, code=500, message=str(e))
 
 
-@object_bp.route('/api/v3/findmany/resource/directory', methods=['POST'])
 @object_bp.route('/findmany/resource/directory', methods=['POST'])
 def findmany_resource_directory():
     """搜索资源目录"""
@@ -1131,7 +1298,7 @@ def findmany_resource_directory():
         biz_id = resource_pool_biz.get("bk_biz_id")
         
         # 查询主机-模块关系
-        host_relations = list(conn.cc_HostModuleRelation.find({"bk_biz_id": biz_id}))
+        host_relations = list(conn.cc_ModuleHostConfig.find({"bk_biz_id": biz_id}))
         
         # 查找资源池集群
         resource_pool_set = conn.cc_SetBase.find_one({"bk_biz_id": biz_id})
@@ -1218,7 +1385,6 @@ def findmany_resource_directory():
         return make_response(result=False, code=500, message=str(e))
 
 
-@object_bp.route('/api/v3/find/module/host/relation/<int:bk_biz_id>', methods=['POST'])
 @object_bp.route('/find/module/host/relation/<int:bk_biz_id>', methods=['POST'])
 def find_module_host_relation(bk_biz_id):
     """根据模块ID查找主机关联关系"""
@@ -1251,12 +1417,12 @@ def find_module_host_relation(bk_biz_id):
 
         # 查询主机-模块关系
         if module_ids:
-            host_relations = list(conn.cc_HostModuleRelation.find({
+            host_relations = list(conn.cc_ModuleHostConfig.find({
                 "bk_biz_id": bk_biz_id,
                 "bk_module_id": {"$in": module_ids}
             }))
         else:
-            host_relations = list(conn.cc_HostModuleRelation.find({
+            host_relations = list(conn.cc_ModuleHostConfig.find({
                 "bk_biz_id": bk_biz_id
             }))
 
@@ -1367,7 +1533,6 @@ def find_module_host_relation(bk_biz_id):
         return make_response(result=False, code=500, message=str(e))
 
 
-@object_bp.route('/api/v3/usercustom/user/search', methods=['POST'])
 @object_bp.route('/usercustom/user/search', methods=['POST'])
 def usercustom_user_search():
     """用户自定义搜索用户"""
@@ -1399,7 +1564,6 @@ def usercustom_user_search():
         return make_response(result=False, code=500, message=str(e))
 
 
-@object_bp.route('/api/v3/usercustom/default/model', methods=['POST'])
 @object_bp.route('/usercustom/default/model', methods=['POST'])
 def usercustom_default_model():
     """用户自定义默认模型"""
@@ -1411,7 +1575,6 @@ def usercustom_default_model():
         return make_response(result=False, code=500, message=str(e))
 
 
-@object_bp.route('/api/v3/find/topoinst/biz_set/<int:biz_set_id>', methods=['POST'])
 @object_bp.route('/find/topoinst/biz_set/<int:biz_set_id>', methods=['POST'])
 def find_biz_set_topo_inst(biz_set_id):
     """获取业务集拓扑实例"""

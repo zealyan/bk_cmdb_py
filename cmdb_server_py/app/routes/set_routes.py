@@ -10,14 +10,24 @@ from datetime import datetime
 set_bp = Blueprint('set', __name__)
 
 
-def make_response(result=True, code=0, message="success", data=None):
-    """统一响应格式"""
-    return jsonify({
+def make_response(result=True, code=0, message="success", data=None, **kwargs):
+    """统一响应格式（兼容 bk-cmdb 前端 bk_error_code 判定）"""
+    if result and code == 0:
+        bk_error_code, bk_error_msg = 0, ""
+    else:
+        bk_error_code = code if code != 0 else 500
+        bk_error_msg = message
+    response = {
+        "bk_error_code": bk_error_code,
+        "bk_error_msg": bk_error_msg,
         "result": result,
         "code": code,
         "message": message,
-        "data": data
-    })
+    }
+    if data is not None:
+        response["data"] = data
+    response.update(kwargs)
+    return jsonify(response)
 
 
 @set_bp.route('/api/v3/set/<int:biz_id>', methods=['POST'])

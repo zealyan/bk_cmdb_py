@@ -63,8 +63,10 @@ class Config:
     
     DB_ENV = os.environ.get('DB_ENV', 'pglite').lower()
     
-    MONGODB_URI = os.environ.get('MONGODB_URI') or 'mongodb://localhost:27017/'
-    MONGODB_DB = os.environ.get('MONGODB_DB') or 'bk_cmdb'
+    # 项目统一使用 bk-cmdb 通过 initdb 初始化的 ``cmdb`` MongoDB 实例。
+    # 不再连接本项目私有的 bk_cmdb 库（其 mock 数据已清理）。
+    MONGODB_URI = os.environ.get('MONGODB_URI') or 'mongodb://cc:cc@127.0.0.1:27017/cmdb?authSource=cmdb'
+    MONGODB_DB = os.environ.get('MONGODB_DB') or 'cmdb'
     
     PGLITE_DATA_DIR = os.environ.get('PGLITE_DATA_DIR') or './pglite_data'
     
@@ -86,6 +88,20 @@ class Config:
     if SKIP_LOGIN:
         print("[Skip Login] 已启用自动登录功能（开发模式）")
     SKIP_LOGIN_USER = os.environ.get('SKIP_LOGIN_USER', 'admin')
+
+    # 内置管理员（internal 鉴权模式）
+    # 与 bk-cmdb common.yaml webServer.session.userInfo: admin:admin 对齐。
+    # 仅作为运行时鉴权兜底，不写入 MongoDB（项目只保留 initdb 原生数据）。
+    ADMIN_USERNAME = os.environ.get('ADMIN_USERNAME', 'admin')
+    ADMIN_PASSWORD = os.environ.get('ADMIN_PASSWORD', 'admin')
+
+    @classmethod
+    def is_superuser(cls, username) -> bool:
+        """判断是否为内置超级管理员（internal 模式下的 admin 账户）。
+
+        超级管理员不受 user_business 业务权限表约束，可访问全部业务与拓扑。
+        """
+        return bool(username) and username == cls.ADMIN_USERNAME
     
     @classmethod
     def is_production(cls) -> bool:

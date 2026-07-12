@@ -9,8 +9,7 @@ from app.routes.object_routes import object_bp
 from app.routes.auth_routes import auth_bp
 from app.routes.set_routes import set_bp
 from app.routes.module_routes import module_bp
-from app.models.db import init_mock_data, list_collections, get_collection_count, is_mongo_available
-from app.auth.policies import init_admin_super_permission, init_default_policies
+from app.models.db import list_collections, get_collection_count, is_mongo_available
 
 app = Flask(__name__)
 app.config.from_object(Config)
@@ -18,7 +17,11 @@ app.config.from_object(Config)
 Session(app)
 
 # 配置 CORS，支持 withCredentials
-CORS(app, supports_credentials=True, origins=['http://localhost:8080', 'http://127.0.0.1:8080'])
+# 包含 UI 服务端口（默认 8085），便于浏览器跨源调用 /api/v3
+CORS(app, supports_credentials=True, origins=[
+    'http://localhost:8080', 'http://127.0.0.1:8080',
+    'http://localhost:8085', 'http://127.0.0.1:8085',
+])
 
 # 注册路由蓝图（带 /api/v3 前缀的版本）
 app.register_blueprint(user_bp, url_prefix='/api/v3')
@@ -30,11 +33,15 @@ app.register_blueprint(set_bp, url_prefix='/api/v3')
 app.register_blueprint(module_bp, url_prefix='/api/v3')
 
 
-def init_data():
-    init_mock_data()
-    # 初始化权限策略
-    init_admin_super_permission()
-    init_default_policies()
+def verify_db():
+    """启动校验：确认 MongoDB 引擎连接有效。
+
+    项目统一使用 bk-cmdb 的 ``cmdb`` 实例数据，不再做本地 mock 初始化。
+    """
+    if is_mongo_available():
+        print(f"[DB] MongoDB 引擎连接有效，当前数据库: {Config.MONGODB_DB}")
+    else:
+        print("[DB] 警告: MongoDB 不可用，请检查 MONGODB_URI / 实例状态")
 
 
 
@@ -108,5 +115,5 @@ def internal_error(error):
 
 
 if __name__ == '__main__':
-    init_data()
+    verify_db()
     app.run(host='0.0.0.0', port=3000, debug=False, use_reloader=False)

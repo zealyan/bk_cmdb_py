@@ -60,3 +60,10 @@ Thumbs.db
 
 # MongoDB
 *.db
+
+# 本地数据与运行时产物（不入库）
+# mongodump 备份目录（BSON，含全量业务/主机数据），禁止入库
+prod_bin/backups/
+# Redis 持久化快照
+*.rdb
+dump.rdb

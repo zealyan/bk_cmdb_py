@@ -5,16 +5,125 @@ admin_bp = Blueprint('admin', __name__)
 
 
 def make_response(result=True, code=0, message="success", data=None, **kwargs):
+    # bk-cmdb 前端统一以 bk_error_code===0 判定请求成功并取 data；
+    # 缺失该字段会让所有列表页静默无数据，故与 result/code 同时下发。
+    if result and code == 0:
+        bk_error_code, bk_error_msg = 0, ""
+    else:
+        bk_error_code = code if code != 0 else 500
+        bk_error_msg = message
     response = {
+        "bk_error_code": bk_error_code,
+        "bk_error_msg": bk_error_msg,
         "result": result,
         "code": code,
-        "message": message
+        "message": message,
     }
     if data is not None:
         response["data"] = data
     # 添加额外的字段到响应顶层
     response.update(kwargs)
     return jsonify(response)
+
+
+def _cond_to_mongo(cond_list):
+    """将 bk-cmdb 搜索条件 [{field, operator, value}] 转换为 Mongo 查询字典。"""
+    q = {}
+    if not cond_list:
+        return q
+    for c in cond_list:
+        field = c.get("field")
+        op = c.get("operator", "$eq")
+        val = c.get("value")
+        if not field:
+            continue
+        if op == "$regex":
+            q[field] = {"$regex": val, "$options": "i"}
+        elif op in ("$in", "$nin"):
+            q[field] = {op: val if isinstance(val, list) else [val]}
+        elif op == "$eq":
+            q[field] = val
+        elif op in ("$ne", "$gt", "$gte", "$lt", "$lte"):
+            q.setdefault(field, {})[op] = val
+        else:
+            q[field] = val
+    return q
+
+
+def _build_host_search_query(conn, req_data):
+    """根据 hosts/search 请求体构造 cc_HostBase 的 Mongo 查询与拓扑候选主机ID。
+
+    支持：
+      - 顶层 bk_biz_id（>0 业务，-1 资源池）
+      - condition 中 bk_obj_id 为 biz/set/module/host 的字段条件
+      - set/module 条件经 cc_ModuleHostConfig 反查所属主机ID
+    返回的 host_q 可直接用于 cc_HostBase 的 find/count_documents。
+    """
+    conditions = req_data.get("condition", []) or []
+    bk_biz_id = req_data.get("bk_biz_id")
+
+    rel_query = {}
+
+    # 业务过滤：顶层 bk_biz_id 或 biz 条件中的 default==1(资源池) / bk_biz_id
+    biz_id = None
+    if isinstance(bk_biz_id, int):
+        if bk_biz_id == -1:
+            biz_id = 1  # 资源池
+        elif bk_biz_id > 0:
+            biz_id = bk_biz_id
+    biz_cond = next((c for c in conditions if c.get("bk_obj_id") == "biz"), None)
+    if biz_cond:
+        for f in biz_cond.get("condition", []) or []:
+            if f.get("field") == "default" and f.get("value") == 1:
+                biz_id = 1
+            elif f.get("field") == "bk_biz_id":
+                biz_id = f.get("value")
+    if biz_id is not None:
+        rel_query["bk_biz_id"] = biz_id
+
+    # 集群条件 -> 候选 set_id
+    set_cond = next((c for c in conditions if c.get("bk_obj_id") == "set"), None)
+    if set_cond and set_cond.get("condition"):
+        set_q = _cond_to_mongo(set_cond["condition"])
+        set_ids = [s["bk_set_id"] for s in conn.cc_SetBase.find(set_q, {"bk_set_id": 1, "_id": 0})]
+        rel_query["bk_set_id"] = {"$in": set_ids}
+
+    # 模块条件 -> 候选 module_id
+    module_cond = next((c for c in conditions if c.get("bk_obj_id") == "module"), None)
+    if module_cond and module_cond.get("condition"):
+        mod_q = _cond_to_mongo(module_cond["condition"])
+        mod_ids = [m["bk_module_id"] for m in conn.cc_ModuleBase.find(mod_q, {"bk_module_id": 1, "_id": 0})]
+        rel_query["bk_module_id"] = {"$in": mod_ids}
+
+    # 拓扑候选主机ID
+    candidate_ids = None
+    if rel_query:
+        candidate_ids = [r["bk_host_id"] for r in
+                         conn.cc_ModuleHostConfig.find(rel_query, {"bk_host_id": 1, "_id": 0})]
+
+    # 主机字段条件
+    host_q = {}
+    host_cond = next((c for c in conditions if c.get("bk_obj_id") == "host"), None)
+    if host_cond and host_cond.get("condition"):
+        host_q = _cond_to_mongo(host_cond["condition"])
+
+    if candidate_ids is not None:
+        host_q["bk_host_id"] = {"$in": candidate_ids}
+
+    return host_q
+
+
+def _normalize_host_doc(doc):
+    """bk-cmdb 前端对 bk_host_innerip / bk_host_outerip 等字段调用 `.split(',')` 期望字符串；
+    本系统部分主机数据存为数组（如 ['10.0.1.11']），直接抛出
+    `TypeError: ...split is not a function` 导致详情页渲染中断、显示“暂无数据”。
+    此处将列表值转为逗号分隔字符串，适配前端标量展示（与原 bk-cmdb 单值字符串字段一致）。"""
+    if not isinstance(doc, dict):
+        return doc
+    for k, v in list(doc.items()):
+        if isinstance(v, list):
+            doc[k] = ",".join(str(x) for x in v)
+    return doc
 
 
 def get_mock_config():
@@ -188,7 +297,10 @@ DEFAULT_BIZ_SETS = [
 @admin_bp.route('/findmany/biz_set/with_reduced', methods=['GET', 'POST'])
 def biz_set_reduced():
     try:
-        return make_response(info=DEFAULT_BIZ_SETS)
+        return make_response(
+            data={"count": len(DEFAULT_BIZ_SETS), "info": DEFAULT_BIZ_SETS},
+            info=DEFAULT_BIZ_SETS,
+        )
     except Exception as e:
         return make_response(result=False, code=500, message=str(e))
 
@@ -203,7 +315,10 @@ def biz_set_simplify():
             }
             for bs in DEFAULT_BIZ_SETS
         ]
-        return make_response(info=simplified_list)
+        return make_response(
+            data={"count": len(simplified_list), "info": simplified_list},
+            info=simplified_list,
+        )
     except Exception as e:
         return make_response(result=False, code=500, message=str(e))
 
@@ -536,10 +651,9 @@ def find_service_template_sync_status(bk_biz_id):
             return make_response(data={"info": result, "count": len(result)})
         except Exception as db_error:
             print(f"MongoDB查询失败，使用fallback数据: {db_error}")
-            # 使用INIT_DATA作为fallback
-            from app.models.db import INIT_DATA, get_db_connection
-            all_templates = INIT_DATA.get('cc_ServiceTemplate', [])
-            
+            # fallback：直接从 cmdb 实例读取 cc_ServiceTemplate（项目统一数据源）
+            all_templates = list(get_mongo_collection('cc_ServiceTemplate').find({}, {'_id': 0}))
+
             # 过滤数据
             filtered_templates = []
             for template in all_templates:
@@ -621,168 +735,92 @@ def find_object():
 @admin_bp.route('/api/v3/hosts/search', methods=['POST'])
 @admin_bp.route('/hosts/search', methods=['POST'])
 def hosts_search():
+    """主机搜索：支持 bk_biz_id / set / module / host 字段条件、分页与下一页。
+
+    请求体：{ bk_biz_id, condition:[{bk_obj_id, condition:[{field,operator,value}]}],
+             page:{start,limit,sort} }
+    响应：{ info:[{host, module, set, biz}], count }
+    下一页：调用方令 start += limit，直至 start >= count。
+    """
     try:
-        from app.models.db import get_db_connection
         conn = get_db_connection()
         if conn is None:
             return make_response(result=False, code=500, message="数据库连接失败")
 
-        # 获取请求数据
         req_data = request.get_json() or {}
-        page = req_data.get('page', {})
+        page = req_data.get('page', {}) or {}
         start = page.get('start', 0)
         limit = page.get('limit', 20)
         sort = page.get('sort', 'bk_host_id')
-        conditions = req_data.get('condition', [])
-        
-        # 查询条件处理
-        query = {}
-        host_ids_filter = None
-        
-        # 如果有条件，处理条件
-        if conditions and len(conditions) > 0:
-            # 查找资源池业务条件
-            biz_condition = None
-            for cond in conditions:
-                if cond.get('bk_obj_id') == 'biz':
-                    biz_condition = cond
-                    break
-            
-            # 如果有资源池条件，并且是默认业务，查询所有主机
-            if biz_condition:
-                biz_filter = biz_condition.get('condition', [])
-                for f in biz_filter:
-                    if f.get('field') == 'default' and f.get('value') == 1:
-                        # 查询资源池下的所有主机
-                        host_relations = list(conn.cc_HostModuleRelation.find({"bk_biz_id": 1}))
-                        host_ids_filter = [r.get('bk_host_id') for r in host_relations]
-                        if host_ids_filter:
-                            query = {"bk_host_id": {"$in": host_ids_filter}}
-        
-        # 查询主机数据
+
+        # 解析搜索条件（bk_biz_id / set / module / host 字段）
+        host_q = _build_host_search_query(conn, req_data)
+
         collection = conn['cc_HostBase']
-        cursor = collection.find(query)
-        
+        total_count = collection.count_documents(host_q)
+
         # 排序
+        cursor = collection.find(host_q)
         if sort:
-            sort_dir = 1
-            if sort.startswith('-'):
-                sort_dir = -1
-                sort = sort[1:]
-            cursor = cursor.sort(sort, sort_dir)
-        
-        # 总数
-        total_count = collection.count_documents(query)
-        
+            sort_dir = -1 if sort.startswith('-') else 1
+            sort_field = sort[1:] if sort.startswith('-') else sort
+            cursor = cursor.sort(sort_field, sort_dir)
+
         # 分页
         cursor = cursor.skip(start).limit(limit)
-        
-        # 处理结果，构建符合前端期望的数据结构
+
+        # 收集主机ID用于关联查询
+        host_id_list = [doc.get('bk_host_id') for doc in cursor]
+
         result_info = []
-        host_id_list = []
-        
-        # 先收集主机ID
-        for doc in cursor:
-            host_id = doc.get('bk_host_id')
-            host_id_list.append(host_id)
-        
-        # 如果有主机，查询它们的主机-模块关系
         if host_id_list:
-            # 查询主机-模块关系
-            host_relations = list(conn.cc_HostModuleRelation.find({
-                "bk_host_id": {"$in": host_id_list}
-            }))
-            
-            # 获取所有涉及的模块ID
+            host_relations = list(conn.cc_ModuleHostConfig.find({"bk_host_id": {"$in": host_id_list}}))
+
             module_ids = list(set([r.get('bk_module_id') for r in host_relations if r.get('bk_module_id')]))
-            
-            # 查询模块信息
+            set_ids = list(set([r.get('bk_set_id') for r in host_relations if r.get('bk_set_id')]))
+            biz_ids = list(set([r.get('bk_biz_id') for r in host_relations if r.get('bk_biz_id')]))
+
             module_map = {}
             if module_ids:
-                module_docs = list(conn.cc_ModuleBase.find({"bk_module_id": {"$in": module_ids}}))
-                for m in module_docs:
+                for m in conn.cc_ModuleBase.find({"bk_module_id": {"$in": module_ids}}):
                     m.pop('_id', None)
                     module_map[m.get('bk_module_id')] = m
-            
-            # 获取所有涉及的集群ID
-            set_ids = list(set([r.get('bk_set_id') for r in host_relations if r.get('bk_set_id')]))
-            
-            # 查询集群信息
+
             set_map = {}
             if set_ids:
-                set_docs = list(conn.cc_SetBase.find({"bk_set_id": {"$in": set_ids}}))
-                for s in set_docs:
+                for s in conn.cc_SetBase.find({"bk_set_id": {"$in": set_ids}}):
                     s.pop('_id', None)
                     set_map[s.get('bk_set_id')] = s
-            
-            # 查询业务信息 - 根据实际的主机-模块关系获取业务ID
-            biz_ids = list(set([rel.get('bk_biz_id') for rel in host_relations if rel.get('bk_biz_id')]))
+
             biz_map = {}
             if biz_ids:
-                biz_docs = list(conn.cc_ApplicationBase.find({"bk_biz_id": {"$in": biz_ids}}))
-                for biz in biz_docs:
-                    biz.pop('_id', None)
-                    biz_map[biz.get('bk_biz_id')] = biz
-            
-            # 构建主机-模块-集群映射
+                for b in conn.cc_ApplicationBase.find({"bk_biz_id": {"$in": biz_ids}}):
+                    b.pop('_id', None)
+                    biz_map[b.get('bk_biz_id')] = b
+
             host_module_map = {}
             host_set_map = {}
             host_biz_map = {}
-            
             for rel in host_relations:
-                host_id = rel.get('bk_host_id')
-                set_id = rel.get('bk_set_id')
-                module_id = rel.get('bk_module_id')
-                
-                if host_id not in host_module_map:
-                    host_module_map[host_id] = []
-                if module_id not in host_module_map[host_id]:
-                    host_module_map[host_id].append(module_id)
-                
-                if host_id not in host_set_map:
-                    host_set_map[host_id] = []
-                if set_id not in host_set_map[host_id]:
-                    host_set_map[host_id].append(set_id)
-                
-                if host_id not in host_biz_map:
-                    host_biz_map[host_id] = rel.get('bk_biz_id')
-            
-            # 重新查询主机数据并构建返回结果
+                hid = rel.get('bk_host_id')
+                host_module_map.setdefault(hid, [])
+                if rel.get('bk_module_id') not in host_module_map[hid]:
+                    host_module_map[hid].append(rel.get('bk_module_id'))
+                host_set_map.setdefault(hid, [])
+                if rel.get('bk_set_id') not in host_set_map[hid]:
+                    host_set_map[hid].append(rel.get('bk_set_id'))
+                host_biz_map[hid] = rel.get('bk_biz_id')
+
             for doc in collection.find({"bk_host_id": {"$in": host_id_list}}):
                 doc.pop('_id', None)
-                host_id = doc.get('bk_host_id')
-                
-                # 获取该主机的模块、集群、业务信息
-                host_module_ids = host_module_map.get(host_id, [])
-                host_set_ids = host_set_map.get(host_id, [])
-                
-                # 构建返回对象
-                item = {}
-                item['host'] = doc
-                
-                # 添加模块信息
-                modules = []
-                for mid in host_module_ids:
-                    if mid in module_map:
-                        modules.append(module_map[mid].copy())
-                item['module'] = modules
-                
-                # 添加集群信息
-                sets = []
-                for sid in host_set_ids:
-                    if sid in set_map:
-                        sets.append(set_map[sid].copy())
-                item['set'] = sets
-                
-                # 添加业务信息
-                biz = []
-                host_biz_id = host_biz_map.get(host_id)
-                if host_biz_id and host_biz_id in biz_map:
-                    biz.append(biz_map[host_biz_id].copy())
-                item['biz'] = biz
-                
+                hid = doc.get('bk_host_id')
+                item = {'host': _normalize_host_doc(doc)}
+                item['module'] = [module_map[mid].copy() for mid in host_module_map.get(hid, []) if mid in module_map]
+                item['set'] = [set_map[sid].copy() for sid in host_set_map.get(hid, []) if sid in set_map]
+                hbiz = host_biz_map.get(hid)
+                item['biz'] = [biz_map[hbiz].copy()] if (hbiz and hbiz in biz_map) else []
                 result_info.append(item)
-        
+
         return make_response(data={"info": result_info, "count": total_count})
     except Exception as e:
         import traceback
@@ -793,68 +831,75 @@ def hosts_search():
 @admin_bp.route('/api/v3/hosts/search/web', methods=['POST'])
 @admin_bp.route('/hosts/search/web', methods=['POST'])
 def hosts_search_web():
+    """全局主机搜索（顶栏搜索）：复用与 hosts/search 一致的搜索条件解析与分页。"""
     try:
-        from app.models.db import get_db_connection
         conn = get_db_connection()
         if conn is None:
             return make_response(result=False, code=500, message="数据库连接失败")
 
-        # 获取请求数据
         req_data = request.get_json() or {}
-        page = req_data.get('page', {})
+        page = req_data.get('page', {}) or {}
         start = page.get('start', 0)
         limit = page.get('limit', 20)
         sort = page.get('sort', 'bk_host_id')
-        conditions = req_data.get('condition', [])
-        
-        # 查询条件处理
-        query = {}
-        
-        # 如果有条件，处理条件
-        if conditions and len(conditions) > 0:
-            # 查找资源池业务条件
-            biz_condition = None
-            for cond in conditions:
-                if cond.get('bk_obj_id') == 'biz':
-                    biz_condition = cond
-                    break
-            
-            # 如果有资源池条件，并且是默认业务，查询所有主机
-            if biz_condition:
-                biz_filter = biz_condition.get('condition', [])
-                for f in biz_filter:
-                    if f.get('field') == 'default' and f.get('value') == 1:
-                        # 查询资源池下的所有主机
-                        host_relations = list(conn.cc_HostModuleRelation.find({"bk_biz_id": 1}))
-                        host_ids = [r.get('bk_host_id') for r in host_relations]
-                        if host_ids:
-                            query = {"bk_host_id": {"$in": host_ids}}
-        
-        # 查询主机数据
+
+        host_q = _build_host_search_query(conn, req_data)
+
         collection = conn['cc_HostBase']
-        cursor = collection.find(query)
-        
-        # 排序
+        total_count = collection.count_documents(host_q)
+        cursor = collection.find(host_q)
         if sort:
-            sort_dir = 1
-            if sort.startswith('-'):
-                sort_dir = -1
-                sort = sort[1:]
-            cursor = cursor.sort(sort, sort_dir)
-        
-        # 总数
-        total_count = collection.count_documents(query)
-        
-        # 分页
+            sort_dir = -1 if sort.startswith('-') else 1
+            sort_field = sort[1:] if sort.startswith('-') else sort
+            cursor = cursor.sort(sort_field, sort_dir)
         cursor = cursor.skip(start).limit(limit)
-        
-        # 处理结果
+
         hosts = []
         for doc in cursor:
             doc.pop('_id', None)
-            hosts.append(doc)
-        
+            hosts.append(_normalize_host_doc(doc))
+
         return make_response(data={"info": hosts, "count": total_count})
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return make_response(result=False, code=500, message=str(e))
+
+
+@admin_bp.route('/hosts/<supplier_account>/<int:bk_host_id>', methods=['GET'])
+def hosts_detail(supplier_account, bk_host_id):
+    """主机详情：GET /hosts/{bk_supplier_account}/{bk_host_id}
+
+    复刻 bk-cmdb 的 HostInstanceProperties 数组：
+    [{bk_property_id, bk_property_name, bk_property_value}]，属性名取自 cc_ObjAttDes(bk_obj_id=host)。
+    """
+    try:
+        conn = get_db_connection()
+        if conn is None:
+            return make_response(result=False, code=500, message="数据库连接失败")
+
+        host = conn.cc_HostBase.find_one({"bk_host_id": bk_host_id})
+        if not host:
+            return make_response(result=False, code=404, message="主机不存在")
+
+        host.pop('_id', None)
+        # 列表字段（如 bk_host_innerip）转为逗号分隔字符串，避免前端 .split 报错
+        host = _normalize_host_doc(host)
+
+        # 主机属性定义（bk_obj_id=host）
+        attrs = list(conn.cc_ObjAttDes.find({"bk_obj_id": "host"}))
+        properties = []
+        for a in attrs:
+            pid = a.get("bk_property_id")
+            if not pid:
+                continue
+            properties.append({
+                "bk_property_id": pid,
+                "bk_property_name": a.get("bk_property_name", pid),
+                "bk_property_value": host.get(pid)
+            })
+
+        return make_response(data=properties)
     except Exception as e:
         import traceback
         traceback.print_exc()

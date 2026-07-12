@@ -4,7 +4,7 @@ logger = logging.getLogger(__name__)
 
 from flask import Blueprint, request, jsonify, session as flask_session, g
 from functools import wraps
-from app.models.db import db, get_db_connection, INIT_DATA, init_mock_data
+from app.models.db import db, get_db_connection
 from app.auth import hash_password, verify_password
 from app.auth.session import session_manager
 from app.config import Config
@@ -13,10 +13,19 @@ user_bp = Blueprint('user', __name__)
 
 
 def make_response(result=True, code=0, message="success", data=None, **kwargs):
+    # bk-cmdb 前端统一以 bk_error_code===0 判定请求成功并取 data；
+    # 缺失该字段会让所有列表页静默无数据，故与 result/code 同时下发。
+    if result and code == 0:
+        bk_error_code, bk_error_msg = 0, ""
+    else:
+        bk_error_code = code if code != 0 else 500
+        bk_error_msg = message
     response = {
+        "bk_error_code": bk_error_code,
+        "bk_error_msg": bk_error_msg,
         "result": result,
         "code": code,
-        "message": message
+        "message": message,
     }
     if data is not None:
         response["data"] = data
@@ -240,61 +249,84 @@ def user_auth():
         
         conn = get_db_connection()
 
-        
         if conn is None:
             return make_response(
                 result=False,
                 code=500,
                 message="数据库连接失败"
             )
-        
-        user = conn.users.find_one({"username": username})
-        print(f"[DEBUG] 从MongoDB找到用户: {user is not None}")
-        
-        if not user:
-            return make_response(
-                result=False,
-                code=1100000,
-                message="用户名或密码错误"
-            )
-        
-        stored_password = user.get('password', '')
-        
-        if verify_password(password, stored_password):
-            print(f"[DEBUG] 密码验证成功")
-            token = session_manager.generate_token(
-                username=username,
-                user_info={
-                    'display_name': user.get('display_name', ''),
-                    'role': user.get('role', 'user')
+
+        # 优先从 MongoDB 的 users 集合查找（仅当该集合存在时）
+        user = None
+        try:
+            if conn and 'users' in conn.list_collection_names():
+                user = conn.users.find_one({"username": username})
+        except Exception:
+            user = None
+
+        # 内置 internal 管理员兜底：与 bk-cmdb common.yaml
+        # webServer.session.userInfo: admin:admin 一致。
+        # 不写入 MongoDB（项目只保留 initdb 原生数据），仅用于运行时鉴权。
+        if user is None and Config.is_superuser(username):
+            if password == Config.ADMIN_PASSWORD:
+                user = {
+                    "_builtin": True,
+                    "username": Config.ADMIN_USERNAME,
+                    "display_name": "Administrator",
+                    "role": "admin",
                 }
-            )
-            print(f"[DEBUG] 生成 Token: {token[:10]}...")
-            
-            # 设置 Cookie
-            response = make_response(data={
-                "bk_token": token,
-                "username": username,
-                "display_name": user.get('display_name', username)
-            })
-            
-            # 设置 24 小时过期的 Cookie
-            response.set_cookie(
-                'bk_token',
-                token,
-                max_age=86400,  # 24 hours
-                httponly=True,  # 防止 XSS
-                samesite='Lax'
-            )
-            
-            return response
-        else:
-            print(f"[DEBUG] 密码验证失败")
+            else:
+                return make_response(
+                    result=False,
+                    code=1100000,
+                    message="用户名或密码错误"
+                )
+
+        if user is None:
             return make_response(
                 result=False,
                 code=1100000,
                 message="用户名或密码错误"
             )
+
+        # 密码校验：内置管理员走明文比对；Mongo 用户走哈希校验
+        if not user.get('_builtin'):
+            stored_password = user.get('password', '')
+            if not verify_password(password, stored_password):
+                print(f"[DEBUG] 密码验证失败")
+                return make_response(
+                    result=False,
+                    code=1100000,
+                    message="用户名或密码错误"
+                )
+
+        print(f"[DEBUG] 密码验证成功（用户: {username}）")
+        token = session_manager.generate_token(
+            username=username,
+            user_info={
+                'display_name': user.get('display_name', ''),
+                'role': user.get('role', 'user')
+            }
+        )
+        print(f"[DEBUG] 生成 Token: {token[:10]}...")
+
+        # 设置 Cookie
+        response = make_response(data={
+            "bk_token": token,
+            "username": username,
+            "display_name": user.get('display_name', username)
+        })
+
+        # 设置 24 小时过期的 Cookie
+        response.set_cookie(
+            'bk_token',
+            token,
+            max_age=86400,  # 24 hours
+            httponly=True,  # 防止 XSS
+            samesite='Lax'
+        )
+
+        return response
             
     except Exception as e:
         print(f"[DEBUG] 登录异常: {e}")
@@ -362,16 +394,18 @@ def user_logout():
 
 
 @user_bp.route('/proxy/user/list', methods=['POST'])
-@user_bp.route('/user/list', methods=['POST'])
+@user_bp.route('/user/list', methods=['GET', 'POST'])
 def user_list():
     try:
         conn = get_db_connection()
         if conn is None:
             return make_response(result=False, code=500, message="数据库连接失败")
 
-        # 兼容多种请求数据格式
+        # 兼容多种请求数据格式（POST 为 JSON/form/body；GET 参数在 query string）
         req_data = {}
-        if request.is_json:
+        if request.method == 'GET':
+            req_data = request.args.to_dict()
+        elif request.is_json:
             req_data = request.get_json() or {}
         elif request.form:
             req_data = request.form.to_dict()
@@ -379,21 +413,39 @@ def user_list():
             try:
                 import json
                 req_data = json.loads(request.data)
-            except:
+            except Exception:
                 req_data = {}
-        page = req_data.get('page', {})
-        start = page.get('start', 0)
-        limit = page.get('limit', 10)
+        page = req_data.get('page', {}) if isinstance(req_data.get('page'), dict) else {}
+        start = int(page.get('start', 0) or 0)
+        limit = int(page.get('limit', 10) or 10)
+        fuzzy = str(req_data.get('fuzzy_lookups') or req_data.get('fuzzy_lookups') or '').strip().lower()
 
-        users = list(conn.users.find().skip(start).limit(limit))
-        count = conn.users.count_documents({})
+        # 最小系统无独立用户目录，以内置超级管理员 admin 作为唯一账户兜底
+        admin_user = {
+            "bk_username": Config.ADMIN_USERNAME,
+            "username": Config.ADMIN_USERNAME,
+            "bk_role": 1,
+            "role": "admin",
+            "language": "zh",
+        }
+        users = list(conn.users.find())
+        for u in users:
+            u.pop('_id', None)
+            u.pop('password', None)
+        if not users:
+            users = [admin_user]
 
-        # 移除密码字段
-        for user in users:
-            user.pop('_id', None)
-            user.pop('password', None)
+        # 模糊匹配（bk-cmdb 行为）
+        if fuzzy:
+            users = [
+                u for u in users
+                if fuzzy in str(u.get('bk_username', '')).lower()
+                or fuzzy in str(u.get('username', '')).lower()
+            ]
 
-        return make_response(data={"count": count, "info": users})
+        count = len(users)
+        paged = users[start:start + limit] if limit else users
+        return make_response(data={"count": count, "info": paged})
     except Exception as e:
         return make_response(result=False, code=500, message=str(e))
 

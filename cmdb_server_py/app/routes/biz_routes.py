@@ -1,6 +1,7 @@
 from flask import Blueprint, request, jsonify, g
-from app.models.db import db, init_mock_data, get_db_connection
+from app.models.db import db, get_db_connection
 from app.routes.user_routes import require_auth
+from app.config import Config
 from datetime import datetime
 import time
 
@@ -8,10 +9,19 @@ biz_bp = Blueprint('biz', __name__)
 
 
 def make_response(result=True, code=0, message="success", data=None, **kwargs):
+    # bk-cmdb 前端统一以 bk_error_code===0 判定请求成功并取 data；
+    # 缺失该字段会让所有列表页静默无数据，故与 result/code 同时下发。
+    if result and code == 0:
+        bk_error_code, bk_error_msg = 0, ""
+    else:
+        bk_error_code = code if code != 0 else 500
+        bk_error_msg = message
     response = {
+        "bk_error_code": bk_error_code,
+        "bk_error_msg": bk_error_msg,
         "result": result,
         "code": code,
-        "message": message
+        "message": message,
     }
     if data is not None:
         response["data"] = data
@@ -103,7 +113,7 @@ def biz_search(account):
         current_username = getattr(g, 'current_user', None)
         
         # 如果有当前用户，只返回用户有权限的业务
-        if current_username:
+        if current_username and not Config.is_superuser(current_username):
             user_biz_list = list(conn.user_business.find(
                 {'username': current_username},
                 {'bk_biz_id': 1, '_id': 0}
@@ -190,7 +200,7 @@ def biz_simplify():
         
         current_username = getattr(g, 'current_user', None)
         
-        if current_username:
+        if current_username and not Config.is_superuser(current_username):
             user_biz_list = list(conn.user_business.find(
                 {'username': current_username},
                 {'bk_biz_id': 1, '_id': 0}
@@ -228,7 +238,7 @@ def biz_with_reduced():
         current_username = getattr(g, 'current_user', None)
         
         # 如果有当前用户，只返回用户有权限的业务
-        if current_username:
+        if current_username and not Config.is_superuser(current_username):
             user_biz_list = list(conn.user_business.find(
                 {'username': current_username},
                 {'bk_biz_id': 1, '_id': 0}
@@ -247,7 +257,12 @@ def biz_with_reduced():
                 {'_id': 0}
             ).sort('bk_biz_id', 1))
         
-        return make_response(data=businesses, info=businesses)
+        # bk-cmdb 前端业务列表以 data.info 渲染表格、data.count 分页，
+        # 裸数组会导致 data.info.some 抛错使整页崩溃，故统一为 {count, info}。
+        return make_response(
+            data={'count': len(businesses), 'info': businesses},
+            info=businesses,
+        )
     except Exception as e:
         print(f"获取带权限信息的业务列表失败: {e}")
         return make_response(result=False, code=500, message=str(e))

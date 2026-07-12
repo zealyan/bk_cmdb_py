@@ -130,7 +130,7 @@ start_services(){
   start_regdiscv cmdb_apiserver   8081  "--enable-auth=false"
   # webserver 绑定 0.0.0.0，--register-ip 避免 0.0.0.0 注册报错
   cd "$DATA_ROOT/cmdb_webserver"
-  nohup ./"cmdb_webserver" --addrport=0.0.0.0:8083 \
+  nohup ./"cmdb_webserver" --addrport=0.0.0.0:8084 \
     --logtostderr=false --log-dir=./logs --v=3 \
     --regdiscv=127.0.0.1:2181 --register-ip=127.0.0.1 \
     > ./logs/std.log 2>&1 &
@@ -166,7 +166,7 @@ health_check(){
       log "  [FAIL] $s healthz ($p)"
     fi
   done
-  log "  web: http://127.0.0.1:8083/  (账号 admin/admin)"
+  log "  web: http://127.0.0.1:8084/  (账号 admin/admin)"
 }
 
 # ----------------------------- main -----------------------------

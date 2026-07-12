@@ -1,18 +1,16 @@
 """Database Models Package
 
-简化版本，只使用 db.py 中的 MongoDB/内存数据库功能。
+仅使用 db.py 中的 MongoDB 连接与查询能力。项目统一连接 bk-cmdb 的 ``cmdb`` 实例，
+不再提供本地 mock 数据初始化。
 
 Usage:
-    # MongoDB
-    from app.models import db, init_mock_data, get_mongo_collection
-    
-    init_mock_data()
-    collection = get_mongo_collection('users')
+    from app.models import db, get_mongo_collection
+
+    collection = get_mongo_collection('cc_ApplicationBase')
 
 Exports:
     # MongoDB (db.py)
-    - db: 数据库连接
-    - init_mock_data: 初始化数据
+    - db: 数据库连接（延迟加载）
     - list_collections: 列出所有集合
     - get_collection_count: 获取集合记录数
     - get_mongo_collection: 获取指定集合
@@ -21,7 +19,6 @@ Exports:
 
 from app.models.db import (
     db,
-    init_mock_data,
     list_collections,
     get_collection_count,
     get_mongo_collection,
@@ -31,7 +28,6 @@ from app.models.db import (
 
 __all__ = [
     'db',
-    'init_mock_data',
     'list_collections',
     'get_collection_count',
     'get_mongo_collection',
