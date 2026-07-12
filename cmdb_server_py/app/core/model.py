@@ -330,6 +330,20 @@ def create_object_association(params):
     if not (bk_obj_id and bk_asst_id and bk_asst_obj_id):
         raise ModelError("关联缺少 bk_obj_id / bk_asst_id / bk_asst_obj_id", code=400)
     supplier = (params or {}).get("bk_supplier_account") or DEFAULT_SUPPLIER
+    # 确保关联类型在 cc_AsstDes 中存在，缺失时自动补全（避免 UI 实例关联页找不到类型的重复错误）
+    exist_type = _coll(BK_TABLE_NAME_ASST_DES).find_one({"bk_asst_id": bk_asst_id, "bk_supplier_account": supplier})
+    if not exist_type:
+        type_doc = {
+            "id": _new_id(conn, BK_TABLE_NAME_ASST_DES),
+            "bk_asst_id": bk_asst_id,
+            "bk_asst_name": bk_asst_id,
+            "bk_supplier_account": supplier,
+            "src_des": "关联",
+            "dest_des": "被关联",
+            "direction": "src_to_dest",
+            "ispre": False,
+        }
+        _coll(BK_TABLE_NAME_ASST_DES).insert_one(type_doc)
     doc = dict(params)
     doc["bk_obj_asst_id"] = _build_obj_asst_id(bk_obj_id, bk_asst_id, bk_asst_obj_id)
     doc["id"] = _new_id(conn, BK_TABLE_NAME_OBJ_ASST)

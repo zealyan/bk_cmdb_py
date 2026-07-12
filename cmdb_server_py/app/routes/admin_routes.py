@@ -1217,61 +1217,6 @@ def delete_inst_association(obj_id, asst_id):
         return make_response(result=False, code=500, message=str(e))
 
 
-# 关联类型API
-@admin_bp.route('/api/v3/find/associationtype', methods=['POST'])
-@admin_bp.route('/find/associationtype', methods=['POST'])
-def find_association_type():
-    try:
-        data = {
-            "info": [
-                {
-                    "id": 1,
-                    "bk_asst_id": "belong",
-                    "bk_asst_name": "属于",
-                    "bk_asst_type": "special",
-                    "src_type": "module",
-                    "dst_type": "set",
-                    "direction": "src_to_dst"
-                },
-                {
-                    "id": 2,
-                    "bk_asst_id": "contain",
-                    "bk_asst_name": "包含",
-                    "bk_asst_type": "special",
-                    "src_type": "set",
-                    "dst_type": "module",
-                    "direction": "src_to_dst"
-                }
-            ]
-        }
-        return make_response(data=data)
-    except Exception as e:
-        return make_response(result=False, code=500, message=str(e))
-
-
-# 拓扑关联类型API
-@admin_bp.route('/api/v3/find/topoassociationtype', methods=['POST'])
-@admin_bp.route('/find/topoassociationtype', methods=['POST'])
-def find_topo_association_type():
-    try:
-        data = {
-            "info": [
-                {
-                    "id": 1,
-                    "bk_asst_id": "topo",
-                    "bk_asst_name": "拓扑关联",
-                    "bk_asst_type": "topology",
-                    "src_type": "biz",
-                    "dst_type": "set",
-                    "direction": "src_to_dst"
-                }
-            ]
-        }
-        return make_response(data=data)
-    except Exception as e:
-        return make_response(result=False, code=500, message=str(e))
-
-
 # 保存用户自定义配置API
 @admin_bp.route('/api/v3/usercustom', methods=['POST'])
 @admin_bp.route('/usercustom', methods=['POST'])
