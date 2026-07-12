@@ -1,7 +1,7 @@
 import json
 from datetime import datetime
 from flask import Blueprint, jsonify, request
-from app.models.db import get_mongo_collection, get_db_connection
+from app.models.db import get_mongo_collection, get_db_connection, next_sequence
 
 admin_bp = Blueprint('admin', __name__)
 
@@ -1172,9 +1172,8 @@ def create_inst_association():
         bk_asst_id_val = asst_def.get("bk_asst_id", "")
         # 写入分表
         collection = get_mongo_collection(get_inst_asst_collection_name(bk_obj_id))
-        # 自增 id（分表内 max id + 1）
-        max_doc = collection.find_one(sort=[("id", -1)])
-        new_id = 1 if max_doc is None else (max_doc.get("id") or 0) + 1
+        # 全局原子自增 id（对齐 Go NextSequence("cc_InstAsst")）
+        new_id = next_sequence(conn, get_inst_asst_collection_name(bk_obj_id))
         now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         doc = {
             "id": new_id,
@@ -1686,9 +1685,8 @@ def create_service_category():
         if len(existing) > 0:
             return make_response(result=False, code=1408003, message=f"service category name duplicated: {name}")
         
-        max_id_doc = collection.find_one(sort=[("id", -1)])
-        new_id = (max_id_doc.get("id", 0) + 1) if max_id_doc else 1
-        
+        # 全局原子自增 ID（对齐 Go NextSequence("cc_ServiceCategory")）
+        new_id = next_sequence(conn, "cc_ServiceCategory")
         bk_root_id = new_id
         if bk_parent_id > 0:
             parent = collection.find_one({"id": bk_parent_id})

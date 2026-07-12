@@ -4,7 +4,7 @@
 """
 
 from flask import Blueprint, jsonify, request
-from app.models.db import db, get_db_connection
+from app.models.db import db, get_db_connection, next_sequence
 from datetime import datetime
 
 set_bp = Blueprint('set', __name__)
@@ -67,8 +67,8 @@ def create_set(biz_id):
         
         bk_supplier_account = req_data.get('bk_supplier_account', '0')
         
-        max_id_doc = conn.cc_SetBase.find_one(sort=[("bk_set_id", -1)])
-        new_id = (max_id_doc.get("bk_set_id", 0) + 1) if max_id_doc else 1
+        # 全局原子自增 ID（对齐 Go NextSequence("cc_SetBase")）
+        new_id = next_sequence(conn, "cc_SetBase")
         
         set_doc = {
             "bk_set_id": new_id,
@@ -140,8 +140,8 @@ def create_sets_batch(biz_id):
             
             bk_supplier_account = set_data.get('bk_supplier_account', '0')
             
-            max_id_doc = conn.cc_SetBase.find_one(sort=[("bk_set_id", -1)])
-            new_id = (max_id_doc.get("bk_set_id", 0) + 1) if max_id_doc else 1
+            # 全局原子自增 ID（对齐 Go NextSequence("cc_SetBase")）
+            new_id = next_sequence(conn, "cc_SetBase")
             
             set_doc = {
                 "bk_set_id": new_id,

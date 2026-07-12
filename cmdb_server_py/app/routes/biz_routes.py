@@ -1,5 +1,5 @@
 from flask import Blueprint, request, jsonify, g
-from app.models.db import db, get_db_connection
+from app.models.db import db, get_db_connection, next_sequence
 from app.routes.user_routes import require_auth
 from app.config import Config
 from datetime import datetime
@@ -35,16 +35,11 @@ def get_current_time():
 
 
 def get_next_biz_id():
-    """获取下一个业务ID"""
+    """获取下一个业务ID（全局原子自增，对齐 Go NextSequence("cc_ApplicationBase")）"""
     conn = get_db_connection()
     if conn is None:
         return int(time.time() * 1000)
-    max_biz = conn.cc_ApplicationBase.find_one(
-        sort=[('bk_biz_id', -1)]
-    )
-    if max_biz and max_biz.get('bk_biz_id'):
-        return max_biz['bk_biz_id'] + 1
-    return 6
+    return next_sequence(conn, "cc_ApplicationBase")
 
 
 def build_query_conditions(condition):

@@ -10,7 +10,8 @@
     现已全部移除，避免与真实 ``cmdb`` 实例数据产生混淆。
 """
 
-from pymongo import MongoClient
+from datetime import datetime
+from pymongo import MongoClient, ReturnDocument
 from app.config import Config
 
 client = None
@@ -49,6 +50,35 @@ def get_db_connection():
 def get_db():
     """获取数据库连接（延迟加载的别名）。"""
     return get_db_connection()
+
+
+def next_sequence(conn, sequence_name):
+    """Go 风格原子自增 ID 生成器。
+    
+    对应 Go 的 NextSequence(sequenceName)→cc_idgenerator.FindOneAndUpdate。
+    使用 find_one_and_update 原子递增 SequenceID，支持 upsert 自动创建。
+    分表名经 redirectTable 规则重定向：cc_ObjectBase_* → cc_ObjectBase, cc_InstAsst_* → cc_InstAsst。
+    返回递增后的 SequenceID。
+    """
+    # redirectTable：分表重定向到主表（对齐 Go storage/dal/mongo/local/mongo.go）
+    if sequence_name.startswith("cc_ObjectBase_"):
+        sequence_name = "cc_ObjectBase"
+    elif sequence_name.startswith("cc_InstAsst_"):
+        sequence_name = "cc_InstAsst"
+    
+    coll = conn["cc_idgenerator"]
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    result = coll.find_one_and_update(
+        filter={"_id": sequence_name},
+        update={
+            "$inc": {"SequenceID": 1},
+            "$setOnInsert": {"create_time": now_str},
+            "$set": {"last_time": now_str},
+        },
+        upsert=True,
+        return_document=ReturnDocument.AFTER,
+    )
+    return result["SequenceID"]
 
 
 def get_mongo_collection(collection_name):

@@ -4,7 +4,7 @@
 """
 
 from flask import Blueprint, jsonify, request
-from app.models.db import db, get_db_connection
+from app.models.db import db, get_db_connection, next_sequence
 from datetime import datetime
 
 module_bp = Blueprint('module', __name__)
@@ -65,8 +65,8 @@ def create_module(biz_id, set_id):
         
         bk_supplier_account = req_data.get('bk_supplier_account', '0')
         
-        max_id_doc = conn.cc_ModuleBase.find_one(sort=[("bk_module_id", -1)])
-        new_id = (max_id_doc.get("bk_module_id", 0) + 1) if max_id_doc else 1
+        # 全局原子自增 ID（对齐 Go NextSequence("cc_ModuleBase")）
+        new_id = next_sequence(conn, "cc_ModuleBase")
         
         module_doc = {
             "bk_module_id": new_id,

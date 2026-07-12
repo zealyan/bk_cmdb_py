@@ -1,7 +1,7 @@
 import json
 from datetime import datetime
 from flask import Blueprint, jsonify, request, g
-from app.models.db import db, get_db_connection, get_mongo_collection
+from app.models.db import db, get_db_connection, get_mongo_collection, next_sequence
 from app.config import Config
 
 object_bp = Blueprint('object', __name__)
@@ -1232,9 +1232,9 @@ def create_instance(obj_id):
         collection_name = get_inst_collection_name(obj_id)
         collection = get_mongo_collection(collection_name)
 
-        # 取当前最大 ID（按该对象真实主键字段），保证与既有数据自增一致
-        max_doc = collection.find_one(sort=[(id_field, -1)])
-        next_id = 1 if max_doc is None else (max_doc.get(id_field) or 0) + 1
+        # 全局原子自增 ID（对齐 Go NextSequence, redirectTable 自动处理分表→主表）
+        conn = get_db_connection()
+        next_id = next_sequence(conn, collection_name)
 
         # 用真实主键字段写入（host->bk_host_id，通用对象->bk_inst_id …）
         instance_data[id_field] = next_id
