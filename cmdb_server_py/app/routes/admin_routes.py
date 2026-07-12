@@ -104,10 +104,13 @@ def _build_host_search_query(conn, req_data):
     # 业务过滤：顶层 bk_biz_id 或 biz 条件中的 default==1(资源池) / bk_biz_id
     biz_id = None
     if isinstance(bk_biz_id, int):
-        if bk_biz_id == -1:
-            biz_id = 1  # 资源池
-        elif bk_biz_id > 0:
+        if bk_biz_id > 0:
             biz_id = bk_biz_id
+        # bk_biz_id == -1（资源池/全部）或缺省：不限定业务，搜索全部主机。
+        # 注意：关联列表（model-instance/relation/list-table.vue 的 getHostInstances）固定以
+        # bk_biz_id=-1 调用，并显式带 host 字段条件（bk_host_id in [...]）按关联实例ID精确查询。
+        # 若此处把 -1 映射成资源池 biz=1，再用 cc_ModuleHostConfig 反查候选集，会把「已关联但归属
+        # 真实业务（bk_biz_id>1）的主机」过滤成空，导致交换机等模型的实例关联 tab 表格无行。
     biz_cond = next((c for c in conditions if c.get("bk_obj_id") == "biz"), None)
     if biz_cond:
         for f in biz_cond.get("condition", []) or []:
@@ -1062,15 +1065,24 @@ def hosts_detail(supplier_account, bk_host_id):
 @admin_bp.route('/api/v3/find/instassociation', methods=['POST'])
 @admin_bp.route('/find/instassociation', methods=['POST'])
 def find_inst_association():
+    # 注意：前端 model-instance/relation/list.vue 与 host-details/children/association-list.vue
+    # 均对 searchInstAssociation 的返回值直接做 .map(item => ...)，
+    # 因此此处必须直接返回【数组】，不能包成 {info: [...]}（否则 .map 抛错被 try/catch 吞掉，
+    # 导致 this.instances 恒为空、关联 tab 不显示表格）。
     try:
         req = _parse_json_body_flex()
         cond = req.get("condition") or {}
         obj_id = req.get("bk_obj_id")
         if not obj_id:
-            return make_response(data={"info": []})
+            return make_response(data=[])
+        # 类型对齐：bk_inst_id / bk_asst_inst_id 在 Mongo 分表中以 int 存储，
+        # 前端 condition 中的值可能为字符串（如路由参数），需统一转为 int 才能命中。
+        for _k in ("bk_inst_id", "bk_asst_inst_id"):
+            if _k in cond and isinstance(cond[_k], str) and cond[_k].isdigit():
+                cond[_k] = int(cond[_k])
         collection = get_mongo_collection(get_inst_asst_collection_name(obj_id))
         docs = list(collection.find(cond, {"_id": 0}))
-        return make_response(data={"info": docs})
+        return make_response(data=docs)
     except Exception as e:
         import traceback; traceback.print_exc()
         return make_response(result=False, code=500, message=str(e))
