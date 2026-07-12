@@ -9,7 +9,103 @@ from app.auth import hash_password, verify_password
 from app.auth.session import session_manager
 from app.config import Config
 
+import base64
+
 user_bp = Blueprint('user', __name__)
+
+
+# 全局配置中的字段类型校验规则（与 bk-cmdb Go 端 platform_setting 默认 validationRules 对齐）。
+# 前端 src/ui/src/setup/validate.js 的 mixinCustomRules() 仅当 globalConfig.config.validationRules[key]
+# 存在时才会 Validator.extend(key, ...)。bk-cmdb 内置属性（如业务名 bk_biz_name 的 singlechar 类型）
+# 在 property.vue 编辑提交时通过 getValidateRules() 生成 { singlechar: true, length: 256 } 规则，
+# 若 singlechar 等校验器未注册，this.$validator.validateAll() 会抛
+# “[vee-validate] No such validator 'singlechar' exists.” 导致“修改业务名”无法提交。
+# 因此这里必须包含全部参数类型校验器，且 value 为前端 new RegExp(value) 期望的原始正则串（非 base64）。
+GLOBAL_VALIDATION_RULES = {
+    "number": {
+        "value": r"^(\-|\+)?\d+$",
+        "description": "字段类型“数字”的验证规则",
+        "i18n": {"cn": "请输入正确的数字", "en": "Please enter the correct number"}
+    },
+    "float": {
+        "value": r"^[+-]?([0-9]*[.]?[0-9]+|[0-9]+[.]?[0-9]*)([eE][+-]?[0-9]+)?$",
+        "description": "字段类型“浮点”的验证规则",
+        "i18n": {"cn": "请输入正确的浮点数", "en": "Please enter the correct float data"}
+    },
+    "singlechar": {
+        "value": r"\S*",
+        "description": "字段类型“短字符”的验证规则",
+        "i18n": {"cn": "请输入正确的短字符内容", "en": "Please enter the correct content"}
+    },
+    "longchar": {
+        "value": r"\S*",
+        "description": "字段类型“长字符”的验证规则",
+        "i18n": {"cn": "请输入正确的长字符内容", "en": "Please enter the correct content"}
+    },
+    "associationId": {
+        "value": r"^[a-zA-Z][\w]*$",
+        "description": "关联类型唯一标识验证规则",
+        "i18n": {"cn": "格式不正确，请填写英文开头，下划线，数字，英文的组合",
+                  "en": "The format is incorrect, can only contain underscores, numbers, letter and start with a letter"}
+    },
+    "classifyId": {
+        "value": r"^[a-zA-Z][\w]*$",
+        "description": "模型分组唯一标识验证规则",
+        "i18n": {"cn": "请输入正确的内容", "en": "Please enter the correct content"}
+    },
+    "modelId": {
+        "value": r"^[a-zA-Z][\w]*$",
+        "description": "模型唯一标识验证规则",
+        "i18n": {"cn": "格式不正确，请填写英文开头，下划线，数字，英文的组合",
+                  "en": "The format is incorrect, can only contain underscores, numbers, letter and start with a letter"}
+    },
+    "enumId": {
+        "value": r"^[a-zA-Z0-9_-]*$",
+        "description": "字段类型“枚举”ID的验证规则",
+        "i18n": {"cn": "请输入正确的内容", "en": "Please enter the correct content"}
+    },
+    "enumName": {
+        "value": r"^([a-zA-Z0-9_]|[\u4e00-\u9fa5]|[()+\-《》,，；；“”。\ /:])*$",
+        "description": "字段类型“枚举”值的验证规则",
+        "i18n": {"cn": "请输入正确的内容", "en": "Please enter the correct content"}
+    },
+    "fieldId": {
+        "value": r"^[a-zA-Z][\w]*$",
+        "description": "模型字段唯一标识的验证规则",
+        "i18n": {"cn": "请输入正确的内容", "en": "Please enter the correct content"}
+    },
+    "namedCharacter": {
+        "value": r"^[a-zA-Z0-9_\-\u4e00-\u9fa5]+$",
+        "description": "服务分类名称的验证规则",
+        "i18n": {"cn": "格式不正确，特殊符号仅支持(:_-)", "en": "Special symbols only support(:_-)"}
+    },
+    "instanceTagKey": {
+        "value": r"^[a-zA-Z]([a-z0-9A-Z\-_.]*[a-z0-9A-Z])?$",
+        "description": "服务实例标签键的验证规则",
+        "i18n": {"cn": "请输入英文 / 数字, 以英文开头", "en": "Please enter letter / number starts with letter"}
+    },
+    "instanceTagValue": {
+        "value": r"^[a-z0-9A-Z]([a-z0-9A-Z\-_.]*[a-z0-9A-Z])?$",
+        "description": "服务实例标签值的验证规则",
+        "i18n": {"cn": "请输入英文 / 数字", "en": "Please enter letter / number"}
+    },
+    "businessTopoInstNames": {
+        "value": r'^[^\|/:*,<>"?#\s]+$',
+        "description": "集群/模块/拓扑节点/集群模板/服务模板名称的验证规则",
+        "i18n": {"cn": "格式不正确，不能包含特殊字符 | / : * , < > \" ? #及空格",
+                  "en": "The format is incorrect and cannot contain special characters | / : * , < > \" ? # and space"}
+    }
+}
+
+
+# 前端 store/modules/global-config.js 的 unserializeValidationRules() 会对每个规则的 value
+# 执行 Base64.decode(value)（与 bk-cmdb Go 端 EncodeWithBase64 对称）。因此这里的 value
+# 必须是 Base64 编码后的正则串，否则前端 atob 失败（被 try/catch 兜底但会产生噪声，且
+# 若恰好是合法 base64 会被解码成乱码导致校验异常）。统一在模块加载时编码。
+for _rule in GLOBAL_VALIDATION_RULES.values():
+    _raw = _rule["value"]
+    if isinstance(_raw, str):
+        _rule["value"] = base64.b64encode(_raw.encode("utf-8")).decode("ascii")
 
 
 def make_response(result=True, code=0, message="success", data=None, **kwargs):
@@ -702,15 +798,7 @@ def get_current_config():
                 }
             }
         },
-        "validation_rules": {
-            "businessTopoInstNames": {
-                "value": base64.b64encode(b"^[^|/:*,<>\"?# ]*$").decode('utf-8'),
-                "i18n": {
-                    "cn": "格式不正确，不能包含特殊字符 | / : * , < > \" ? #及空格",
-                    "en": "Invalid format, cannot contain special characters | / : * , < > \" ? # or spaces"
-                }
-            }
-        },
+        "validation_rules": GLOBAL_VALIDATION_RULES,
         "set": "空闲机池",
         "idle_pool": {
             "idle": "空闲机",
@@ -757,15 +845,7 @@ def get_default_config():
                 }
             }
         },
-        "validation_rules": {
-            "businessTopoInstNames": {
-                "value": base64.b64encode(b"^[^|/:*,<>\"?# ]*$").decode('utf-8'),
-                "i18n": {
-                    "cn": "格式不正确，不能包含特殊字符 | / : * , < > \" ? #及空格",
-                    "en": "Invalid format, cannot contain special characters | / : * , < > \" ? # or spaces"
-                }
-            }
-        },
+        "validation_rules": GLOBAL_VALIDATION_RULES,
         "set": "空闲机池",
         "idle_pool": {
             "idle": "空闲机",
