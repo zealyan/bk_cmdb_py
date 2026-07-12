@@ -28,6 +28,15 @@ from app.models.tablenames import (
 DEFAULT_SUPPLIER = "0"
 INTERNAL_FIELDS = {"_id", "id", "bk_supplier_account", "create_time", "creator", "ispre"}
 
+# bk-cmdb 内置（预定义）模型：其属性 ispre=True 是合法的。
+# 自定义/网络模型（bk_switch、bk_router 等）的属性不应为 ispre，否则前端会禁用
+# 「必填」复选框并丢弃 isrequired（getPreFieldUpdateParams 仅放行 option/unit/placeholder），
+# 导致「修改模型属性必填/非必填提交不生效」。
+BUILTIN_MODEL_IDS = {
+    "biz", "set", "module", "host", "process", "plat",
+    "cloud_area", "bk_biz_set_obj",
+}
+
 
 class ModelError(Exception):
     """业务逻辑错误，由路由层捕获并转为 make_response(result=False, code=..., message=...)。"""
@@ -224,6 +233,26 @@ def create_model_attributes(params):
 
 def update_model_attributes(rid, params):
     return _update_by_id(BK_TABLE_NAME_OBJ_ATT_DES, rid, params)
+
+
+def normalize_custom_model_ispre():
+    """幂等自愈：将「非内置模型」属性中错误的 ispre=True 归一为 False。
+
+    根因背景：bk-cmdb 的 initdb 数据导入会把自定义/网络模型（如 bk_switch）的
+    名称、固资编号等字段也标记为 ispre=True。前端对 ispre 字段会禁用「必填」复选框，
+    且 saveField 走 getPreFieldUpdateParams（仅放行 option/unit/placeholder），从而丢弃
+    isrequired —— 表现为「修改模型属性必填/非必填，提交数据不生效」。
+
+    内置模型（biz/host/set/module/process/plat/cloud_area/bk_biz_set_obj）的 ispre 保持原值。
+    本函数仅对 ispre=True 且 bk_obj_id 非内置的属性做 $set，重复执行幂等（命中数为 0 时为空操作）。
+    """
+    conn = get_db_connection()
+    if conn is None:
+        return 0
+    coll = _coll(BK_TABLE_NAME_OBJ_ATT_DES)
+    query = {"ispre": True, "bk_obj_id": {"$nin": list(BUILTIN_MODEL_IDS)}}
+    result = coll.update_many(query, {"$set": {"ispre": False}})
+    return result.modified_count
 
 
 def update_model_attribute_index(obj_id, property_id, index):

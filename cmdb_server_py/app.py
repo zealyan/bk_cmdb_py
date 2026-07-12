@@ -47,6 +47,14 @@ def verify_db():
     """
     if is_mongo_available():
         print(f"[DB] MongoDB 引擎连接有效，当前数据库: {Config.MONGODB_DB}")
+        # 幂等自愈：归一化自定义模型属性的 ispre，避免「修改必填提交不生效」
+        try:
+            from app.core import model as _model_core
+            fixed = _model_core.normalize_custom_model_ispre()
+            if fixed:
+                print(f"[DB] 自愈：归一化 {fixed} 个自定义模型属性的 ispre=True→False")
+        except Exception as e:  # 自愈失败不应阻断启动
+            print(f"[DB] 警告: ispre 归一化跳过: {e}")
     else:
         print("[DB] 警告: MongoDB 不可用，请检查 MONGODB_URI / 实例状态")
 
