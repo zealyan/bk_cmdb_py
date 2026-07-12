@@ -365,55 +365,6 @@ def find_object_classification():
         return make_response(result=False, code=500, message=str(e))
 
 
-@object_bp.route('/find/objectassociation', methods=['POST'])
-def find_object_association():
-    try:
-        conn = get_db_connection()
-
-        if conn is None:
-            return make_response(result=False, code=500, message="数据库连接失败")
-        
-        associations = [
-            {
-                "bk_asst_obj_id": "set",
-                "bk_obj_id": "biz",
-                "bk_next_obj": "set",
-                "bk_supplier_account": "0",
-                "is_built_in": True,
-                "is_pre": True
-            },
-            {
-                "bk_asst_obj_id": "module",
-                "bk_obj_id": "set",
-                "bk_next_obj": "module",
-                "bk_supplier_account": "0",
-                "is_built_in": True,
-                "is_pre": True
-            },
-            {
-                "bk_asst_obj_id": "host",
-                "bk_obj_id": "module",
-                "bk_next_obj": "host",
-                "bk_supplier_account": "0",
-                "is_built_in": True,
-                "is_pre": True
-            },
-            {
-                "bk_asst_obj_id": "process",
-                "bk_obj_id": "host",
-                "bk_next_obj": "process",
-                "bk_supplier_account": "0",
-                "is_built_in": True,
-                "is_pre": True
-            }
-        ]
-        return make_response(data=associations)
-    except Exception as e:
-        import traceback
-        traceback.print_exc()
-        return make_response(result=False, code=500, message=str(e))
-
-
 @object_bp.route('/find/objectattgroup', methods=['POST'])
 def find_object_att_group():
     try:

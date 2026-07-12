@@ -9,6 +9,7 @@ from app.routes.object_routes import object_bp
 from app.routes.auth_routes import auth_bp
 from app.routes.set_routes import set_bp
 from app.routes.module_routes import module_bp
+from app.routes.model_routes import model_bp
 from app.models.db import list_collections, get_collection_count, is_mongo_available
 
 app = Flask(__name__)
@@ -35,6 +36,8 @@ app.register_blueprint(object_bp, url_prefix='/api/v3')
 app.register_blueprint(auth_bp, url_prefix='/api/v3')
 app.register_blueprint(set_bp, url_prefix='/api/v3')
 app.register_blueprint(module_bp, url_prefix='/api/v3')
+# 模型管理模块（拓扑/属性/分类/关联/唯一规则/属性分组）门面层，复用 /api/v3 前缀
+app.register_blueprint(model_bp, url_prefix='/api/v3')
 
 
 def verify_db():
