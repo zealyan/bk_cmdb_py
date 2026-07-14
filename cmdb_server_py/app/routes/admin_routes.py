@@ -1237,11 +1237,20 @@ def find_inst_association_by_object(obj_id):
         return make_response(result=False, code=500, message=str(e))
 
 
-# 新增实例关联（对齐 Go CreateInstanceAssociation：同时写入正向 + 反向两条文档）
+# 新增实例关联（对齐 Go pairedInsert：正向 + 反向文档各写入 BOTH 源/目标分表）
+#
 # body: {bk_obj_asst_id, bk_inst_id, bk_asst_inst_id}
-# 从 cc_ObjAsst 反查 bk_obj_id / bk_asst_obj_id / bk_asst_id：
-#   - 正向 → cc_InstAsst_0_pub_{bk_obj_id}
-#   - 反向 → cc_InstAsst_0_pub_{bk_asst_obj_id}（bk_inst_id / bk_asst_inst_id 互换）
+# 从 cc_ObjAsst 反查 bk_obj_id / bk_asst_obj_id，构造两种视角的文档：
+#
+#   【正向视角】bk_obj_id=源, bk_inst_id=源实例, bk_asst_obj_id=目标, bk_asst_inst_id=目标实例
+#   【反向视角】bk_obj_id=目标, bk_inst_id=目标实例, bk_asst_obj_id=源, bk_asst_inst_id=源实例
+#
+# 前端主机详情"关联"tab 对同一张分表 CC_InstAsst_0_pub_{obj} 发两个查询：
+#   - source: {bk_obj_id=当前obj, bk_inst_id=当前instId}  → 需要正向视角文档
+#   - target: {bk_asst_obj_id=当前obj, bk_asst_inst_id=当前instId}  → 需要反向视角文档
+# 因此必须将两种视角的文档都写入当前表，否则 target 查询命中不了。
+#
+# 实现：正向/反向各以独立 id 写入 BOTH cc_InstAsst_0_pub_{源} + cc_InstAsst_0_pub_{目标}。
 # 返回: {id, bk_inst_id, bk_asst_inst_id}
 @admin_bp.route('/api/v3/create/instassociation', methods=['POST'])
 @admin_bp.route('/create/instassociation', methods=['POST'])
@@ -1262,65 +1271,71 @@ def create_inst_association():
         if not asst_def:
             return make_response(result=False, code=500,
                                  message="模型关联定义不存在: " + str(bk_obj_asst_id))
-        bk_obj_id = asst_def.get("bk_obj_id", "")
-        bk_asst_obj_id = asst_def.get("bk_asst_obj_id", "")
+        bk_obj_id = asst_def.get("bk_obj_id", "")         # 关联定义中的「源」类型
+        bk_asst_obj_id = asst_def.get("bk_asst_obj_id", "")  # 关联定义中的「目标」类型
         bk_asst_id_val = asst_def.get("bk_asst_id", "")
         now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         bk_inst_id_int = int(bk_inst_id)
         bk_asst_inst_id_int = int(bk_asst_inst_id)
         supplier = "0"
 
-        # 正向：写入源对象的分表 cc_InstAsst_0_pub_{bk_obj_id}
-        src_seq_name = get_inst_asst_collection_name(bk_obj_id)
-        src_collection = get_mongo_collection(src_seq_name)
-        src_id = next_sequence(conn, src_seq_name)
-        fwd_doc = {
-            "id": src_id,
-            "bk_obj_asst_id": bk_obj_asst_id,
-            "bk_inst_id": bk_inst_id_int,
-            "bk_asst_inst_id": bk_asst_inst_id_int,
-            "bk_obj_id": bk_obj_id,
-            "bk_asst_obj_id": bk_asst_obj_id,
-            "bk_asst_id": bk_asst_id_val,
-            "bk_supplier_account": supplier,
-            "create_time": now_str,
-            "last_time": now_str,
-            "creator": "admin",
-        }
-        src_collection.insert_one(fwd_doc)
+        def _write_pair(table, seq, a_obj_id, a_inst, b_obj_id, b_inst):
+            """向 table 写入一条关联文档（a_obj_id/a_inst → b_obj_id/b_inst）"""
+            coll = get_mongo_collection(table)
+            new_id = next_sequence(conn, seq)
+            doc = {
+                "id": new_id,
+                "bk_obj_asst_id": bk_obj_asst_id,
+                "bk_inst_id": a_inst,
+                "bk_asst_inst_id": b_inst,
+                "bk_obj_id": a_obj_id,
+                "bk_asst_obj_id": b_obj_id,
+                "bk_asst_id": bk_asst_id_val,
+                "bk_supplier_account": supplier,
+                "create_time": now_str,
+                "last_time": now_str,
+                "creator": "admin",
+            }
+            coll.insert_one(doc)
+            return new_id
 
-        # 反向：写入目标对象的分表 cc_InstAsst_0_pub_{bk_asst_obj_id}，bk_inst_id / bk_asst_inst_id 互换
-        # 对齐 Go CreateInstanceAssociation 的 pairedInsert（src/controller/coreservice/core/
-        # instassociation/instance_association.go:CreateInstanceAssociation）。
-        dst_seq_name = get_inst_asst_collection_name(bk_asst_obj_id)
-        dst_collection = get_mongo_collection(dst_seq_name)
-        dst_id = next_sequence(conn, dst_seq_name)
-        rev_doc = {
-            "id": dst_id,
-            "bk_obj_asst_id": bk_obj_asst_id,
-            "bk_inst_id": bk_asst_inst_id_int,      # 互换：目标实例 → 本端
-            "bk_asst_inst_id": bk_inst_id_int,       # 互换：源实例 → 对端
-            "bk_obj_id": bk_asst_obj_id,             # 互换：源类型 = 原目标类型
-            "bk_asst_obj_id": bk_obj_id,             # 互换：目标类型 = 原源类型
-            "bk_asst_id": bk_asst_id_val,
-            "bk_supplier_account": supplier,
-            "create_time": now_str,
-            "last_time": now_str,
-            "creator": "admin",
-        }
-        dst_collection.insert_one(rev_doc)
+        src_table = get_inst_asst_collection_name(bk_obj_id)           # cc_InstAsst_0_pub_bk_switch
+        dst_table = get_inst_asst_collection_name(bk_asst_obj_id)      # cc_InstAsst_0_pub_host
+        src_seq = src_table
+        dst_seq = dst_table
 
-        return make_response(data={"id": src_id, "bk_inst_id": bk_inst_id_int,
+        # 正向视角：源→目标（两个实例）
+        fwd_id = _write_pair(src_table, src_seq,
+                              bk_obj_id, bk_inst_id_int,            # bk_obj_id=bk_switch, inst=switchId
+                              bk_asst_obj_id, bk_asst_inst_id_int)  # asst_obj=host, asst_inst=hostId
+        # 反向视角：目标→源（互换）
+        # 无额外 id 返回，delete 走 $or 清除所有
+
+        # 正向视角也写入目标表（让目标表的 target 查询能命中）
+        _write_pair(dst_table, dst_seq,
+                     bk_obj_id, bk_inst_id_int,
+                     bk_asst_obj_id, bk_asst_inst_id_int)
+        # 反向视角也写入源表（让源表的 target 查询能命中）
+        _write_pair(src_table, src_seq,
+                     bk_asst_obj_id, bk_asst_inst_id_int,
+                     bk_obj_id, bk_inst_id_int)
+        # 反向视角也写入目标表（让目标表的 source 查询能命中）
+        _write_pair(dst_table, dst_seq,
+                     bk_asst_obj_id, bk_asst_inst_id_int,
+                     bk_obj_id, bk_inst_id_int)
+
+        return make_response(data={"id": fwd_id, "bk_inst_id": bk_inst_id_int,
                                     "bk_asst_inst_id": bk_asst_inst_id_int})
     except Exception as e:
         import traceback; traceback.print_exc()
         return make_response(result=False, code=500, message=str(e))
 
 
-# 删除实例关联（对齐 Go: 同时删除正向 + 反向两条配对文档）
+# 删除实例关联（对齐 Go: 从 BOTH 分表清除正向 + 反向共 4 条配对文档）
 # 路径: delete/instassociation/{bk_obj_id}/{association_id}
-# 从分表 cc_InstAsst_0_pub_{bk_obj_id} 删除 id=association_id 的正向记录，
-# 并从 cc_InstAsst_0_pub_{bk_asst_obj_id} 中删除对应的反向配对记录。
+# 逻辑：
+#   1. 从 cc_InstAsst_0_pub_{bk_obj_id} 找到 id=association_id 的文档
+#   2. 用其 bk_obj_asst_id + 双向 inst_id 组合从 BOTH 分表执行 $or 删除
 @admin_bp.route('/api/v3/delete/instassociation/<obj_id>/<asst_id>', methods=['DELETE'])
 @admin_bp.route('/delete/instassociation/<obj_id>/<asst_id>', methods=['DELETE'])
 def delete_inst_association(obj_id, asst_id):
@@ -1328,24 +1343,25 @@ def delete_inst_association(obj_id, asst_id):
         conn = get_db_connection()
         if conn is None:
             return make_response(result=False, code=500, message="数据库连接失败")
-        # 1. 先查正向文档（获取配对信息）
+        # 1. 找到参考文档
         collection = get_mongo_collection(get_inst_asst_collection_name(obj_id))
-        fwd_doc = collection.find_one({"id": int(asst_id)}, {"_id": 0})
-        if not fwd_doc:
+        doc = collection.find_one({"id": int(asst_id)}, {"_id": 0})
+        if not doc:
             return make_response(result=False, code=404,
                                  message="实例关联不存在: id=%s" % asst_id)
-        # 2. 删除正向文档
-        collection.delete_one({"id": int(asst_id)})
-        # 3. 删除反向配对文档（bk_obj_id / bk_inst_id 互换）
-        rev_obj_id = fwd_doc.get("bk_asst_obj_id")
-        if rev_obj_id:
-            rev_collection = get_mongo_collection(get_inst_asst_collection_name(rev_obj_id))
-            rev_collection.delete_one({
-                "bk_obj_id": fwd_doc.get("bk_asst_obj_id"),
-                "bk_inst_id": fwd_doc.get("bk_asst_inst_id"),
-                "bk_asst_obj_id": fwd_doc.get("bk_obj_id"),
-                "bk_asst_inst_id": fwd_doc.get("bk_inst_id"),
-            })
+        A, B = doc.get("bk_inst_id"), doc.get("bk_asst_inst_id")
+        asst_type = doc.get("bk_obj_asst_id")
+        # 2. 从 BOTH 分表删除所有 4 条配对文档（正向/反向视角各 2 条）
+        q = {
+            "bk_obj_asst_id": asst_type,
+            "$or": [
+                {"bk_inst_id": A, "bk_asst_inst_id": B},
+                {"bk_inst_id": B, "bk_asst_inst_id": A},
+            ]
+        }
+        for tbl in (get_inst_asst_collection_name(obj_id),
+                     get_inst_asst_collection_name(doc.get("bk_asst_obj_id", ""))):
+            get_mongo_collection(tbl).delete_many(q)
         return make_response(data={})
     except Exception as e:
         import traceback; traceback.print_exc()
