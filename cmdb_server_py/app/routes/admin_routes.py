@@ -1339,19 +1339,29 @@ def create_inst_association():
 @admin_bp.route('/api/v3/delete/instassociation/<obj_id>/<asst_id>', methods=['DELETE'])
 @admin_bp.route('/delete/instassociation/<obj_id>/<asst_id>', methods=['DELETE'])
 def delete_inst_association(obj_id, asst_id):
+    # 说明：一条逻辑关联在 MongoDB 中以 4 条配对文档存储（正向/反向视角 × 源/目标分表），
+    # 但前端关联 tab 会用「source + target」两次查询把同一条关联渲染成【两行】。
+    # 因此删除其中任一行时，下方 delete_many($or) 会一次性清掉全部 4 条配对文档，
+    # 列表中另一行实际已被删除。为避免用户再次点击残留行时报 404，此处对删除做【幂等】处理：
+    #   参考文档已不存在 → 直接视为删除成功（关联早已被清掉），返回 200 而非 404。
     try:
         conn = get_db_connection()
         if conn is None:
             return make_response(result=False, code=500, message="数据库连接失败")
-        # 1. 找到参考文档
-        collection = get_mongo_collection(get_inst_asst_collection_name(obj_id))
-        doc = collection.find_one({"id": int(asst_id)}, {"_id": 0})
+        try:
+            aid = int(asst_id)
+        except (ValueError, TypeError):
+            return make_response(result=False, code=400,
+                                 message="非法的关联ID: %s" % asst_id)
+        # 1. 在当前模型分表定位参考文档（前端列表行的 id 均落在该分表内）
+        tbl_obj = get_inst_asst_collection_name(obj_id)
+        doc = get_mongo_collection(tbl_obj).find_one({"id": aid}, {"_id": 0})
         if not doc:
-            return make_response(result=False, code=404,
-                                 message="实例关联不存在: id=%s" % asst_id)
+            # 幂等成功：该行关联可能已随另一侧被删除（前端列表残留），目标状态已达成
+            return make_response(data={})
         A, B = doc.get("bk_inst_id"), doc.get("bk_asst_inst_id")
         asst_type = doc.get("bk_obj_asst_id")
-        # 2. 从 BOTH 分表删除所有 4 条配对文档（正向/反向视角各 2 条）
+        # 2. 从「当前模型分表」与「关联对方分表」删除全部 4 条配对文档
         q = {
             "bk_obj_asst_id": asst_type,
             "$or": [
@@ -1359,9 +1369,9 @@ def delete_inst_association(obj_id, asst_id):
                 {"bk_inst_id": B, "bk_asst_inst_id": A},
             ]
         }
-        for tbl in (get_inst_asst_collection_name(obj_id),
-                     get_inst_asst_collection_name(doc.get("bk_asst_obj_id", ""))):
-            get_mongo_collection(tbl).delete_many(q)
+        get_mongo_collection(tbl_obj).delete_many(q)
+        get_mongo_collection(get_inst_asst_collection_name(
+            doc.get("bk_asst_obj_id", ""))).delete_many(q)
         return make_response(data={})
     except Exception as e:
         import traceback; traceback.print_exc()
