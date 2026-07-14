@@ -79,12 +79,18 @@ def create_module(biz_id, set_id):
             "bk_service_category_id": req_data.get('bk_service_category_id', 1),
             "create_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "last_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "bk_data_status": "enabled"
+            "bk_data_status": "enabled",
         }
-        
+        # 拓扑树实例标识字段（与 bk_module_id/bk_module_name 对齐）。
+        # 业务拓扑“新建模块”走 handleCreateNode，会把响应直接合并进节点对象，
+        # 必须返回 bk_inst_id/bk_inst_name 节点才能正确渲染。
+        module_doc["bk_inst_id"] = new_id
+        module_doc["bk_inst_name"] = bk_module_name
+
         conn.cc_ModuleBase.insert_one(module_doc)
-        
-        return make_response(data={"bk_module_id": new_id, "bk_module_name": bk_module_name})
+        module_doc.pop("_id", None)
+
+        return make_response(data=module_doc)
     except Exception as e:
         import traceback
         traceback.print_exc()
@@ -97,29 +103,27 @@ def search_module(supplier_account, biz_id, set_id):
     """
     查询模块列表
     POST /module/search/{bkSupplierAccount}/{bkBizId}/{bkSetId}
-    
+
     请求体:
     {
-        "condition": {},
+        "condition": {"bk_module_id": 7},
         "fields": [],
         "page": {"start": 0, "limit": 20}
     }
-    
-    响应:
+
+    响应（bk-cmdb 标准 {count, info} 信封）:
     {
-        "result": true,
-        "code": 0,
-        "message": "success",
-        "data": [
-            {
-                "bk_module_id": 1,
-                "bk_module_name": "模块名称",
-                "bk_set_id": 1,
-                "bk_biz_id": 2,
-                ...
-            }
-        ]
+        "result": true, "code": 0, "message": "success",
+        "data": {
+            "count": 1,
+            "info": [{"bk_module_id": 7, "bk_module_name": "...", "bk_inst_id": 7, "bk_inst_name": "...", ...}]
+        }
     }
+
+    说明:
+    前端 getModuleInstance / addModulesInSetTemplate 等统一读取 response.data.info
+    （见 1077.*.js 的 n.info[0] 与 r.info.forEach），因此必须返回 {count, info} 信封；
+    同时合并 condition 精确过滤，确保点击模块节点取到的是该模块而非列表首条。
     """
     try:
         conn = get_db_connection()
@@ -127,19 +131,32 @@ def search_module(supplier_account, biz_id, set_id):
             return make_response(result=False, code=500, message="数据库连接失败")
 
         req_data = request.get_json() or {}
-        
+
+        # 基础过滤（set_id 取自 URL 路径）
         filter_query = {
             "bk_biz_id": biz_id,
             "bk_set_id": set_id,
             "bk_supplier_account": supplier_account,
-            "bk_data_status": {"$ne": "disabled"}
+            "bk_data_status": {"$ne": "disabled"},
         }
-        
-        modules = list(conn.cc_ModuleBase.find(filter_query))
-        
-        result = []
+
+        # 合并请求体 condition（支持裸值 / {$eq: x} / 其它 Mongo 操作符）
+        for k, v in (req_data.get("condition") or {}).items():
+            if isinstance(v, dict) and "$eq" in v:
+                filter_query[k] = v["$eq"]
+            else:
+                filter_query[k] = v
+
+        page = req_data.get("page") or {}
+        start = int(page.get("start", 0) or 0)
+        limit = int(page.get("limit", 20) or 20)
+
+        total = conn.cc_ModuleBase.count_documents(filter_query)
+        modules = list(conn.cc_ModuleBase.find(filter_query).skip(start).limit(limit))
+
+        info = []
         for m in modules:
-            result.append({
+            info.append({
                 "bk_module_id": m.get("bk_module_id"),
                 "bk_module_name": m.get("bk_module_name"),
                 "bk_set_id": m.get("bk_set_id"),
@@ -148,11 +165,14 @@ def search_module(supplier_account, biz_id, set_id):
                 "bk_parent_id": m.get("bk_parent_id"),
                 "bk_parent_obj": m.get("bk_parent_obj"),
                 "bk_service_category_id": m.get("bk_service_category_id"),
+                # 拓扑树实例标识字段：与 bk_module_id/bk_module_name 对齐
+                "bk_inst_id": m.get("bk_inst_id", m.get("bk_module_id")),
+                "bk_inst_name": m.get("bk_inst_name", m.get("bk_module_name")),
                 "create_time": m.get("create_time"),
                 "last_time": m.get("last_time")
             })
-        
-        return make_response(data=result)
+
+        return make_response(data={"count": total, "info": info})
     except Exception as e:
         import traceback
         traceback.print_exc()

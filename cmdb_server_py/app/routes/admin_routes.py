@@ -118,24 +118,43 @@ def _build_host_search_query(conn, req_data):
                 biz_id = 1
             elif f.get("field") == "bk_biz_id":
                 biz_id = f.get("value")
-    if biz_id is not None:
-        rel_query["bk_biz_id"] = biz_id
-
-    # 集群条件 -> 候选 set_id
+    # 集群条件 -> 候选 set_id（同时取集合真实归属业务）
     set_cond = next((c for c in conditions if c.get("bk_obj_id") == "set"), None)
+    set_ids = []
+    set_biz = None
     if set_cond and set_cond.get("condition"):
         set_q = _cond_to_mongo(set_cond["condition"])
-        set_ids = [s["bk_set_id"] for s in conn.cc_SetBase.find(set_q, {"bk_set_id": 1, "_id": 0})]
-        rel_query["bk_set_id"] = {"$in": set_ids}
+        set_docs = list(conn.cc_SetBase.find(set_q, {"bk_set_id": 1, "bk_biz_id": 1, "_id": 0}))
+        set_ids = [s["bk_set_id"] for s in set_docs]
+        if set_ids:
+            rel_query["bk_set_id"] = {"$in": set_ids}
+            # 集群唯一归属某一业务。以其真实归属业务作为范围（而非请求里的“当前业务”），
+            # 避免空闲机池/资源池的 set 被“当前业务 bk_biz_id”误过滤成空结果
+            # （业务拓扑里选中空闲机池节点时，前端按当前业务 bk_biz_id=3 查询，
+            #  但空闲机池实际属于资源池 bk_biz_id=1，导致列表空、统计为0）。
+            set_biz = set_docs[0].get("bk_biz_id")
 
-    # 模块条件 -> 候选 module_id
+    # 模块条件 -> 候选 module_id（同样取真实归属业务）
     module_cond = next((c for c in conditions if c.get("bk_obj_id") == "module"), None)
+    mod_ids = []
+    mod_biz = None
     if module_cond and module_cond.get("condition"):
         mod_q = _cond_to_mongo(module_cond["condition"])
-        mod_ids = [m["bk_module_id"] for m in conn.cc_ModuleBase.find(mod_q, {"bk_module_id": 1, "_id": 0})]
-        rel_query["bk_module_id"] = {"$in": mod_ids}
+        mod_docs = list(conn.cc_ModuleBase.find(mod_q, {"bk_module_id": 1, "bk_biz_id": 1, "bk_set_id": 1, "_id": 0}))
+        mod_ids = [m["bk_module_id"] for m in mod_docs]
+        if mod_ids:
+            rel_query["bk_module_id"] = {"$in": mod_ids}
+            mod_biz = mod_docs[0].get("bk_biz_id")
 
-    # 拓扑候选主机ID
+    # 业务取值范围优先级：set/module 真实归属业务 > 请求中的 bk_biz_id。
+    # 仅在没有 set/module 条件收窄时，才直接使用请求的 bk_biz_id（如主机管理按业务搜索）。
+    scope_biz = set_biz if set_biz is not None else mod_biz
+    if scope_biz is not None:
+        rel_query["bk_biz_id"] = scope_biz
+    elif biz_id is not None:
+        rel_query["bk_biz_id"] = biz_id
+
+    # 拓扑候选主机ID（仅当 biz/set/module 条件收窄时才有意义）
     candidate_ids = None
     if rel_query:
         candidate_ids = [r["bk_host_id"] for r in
@@ -148,7 +167,20 @@ def _build_host_search_query(conn, req_data):
         host_q = _cond_to_mongo(host_cond["condition"])
 
     if candidate_ids is not None:
-        host_q["bk_host_id"] = {"$in": candidate_ids}
+        if "bk_host_id" in host_q:
+            # 交集：候选集（按 biz/set/module 收窄）与主机字段条件（如 bk_host_id=$eq）取AND，
+            # 绝不能覆盖——否则主机详情按 bk_host_id 精确查询时会被“业务下全部主机”反查结果淹没，
+            # 导致 getHostInfo 取回列表首条（非目标主机），所属拓扑显示成别的模块/集群。
+            existing = host_q["bk_host_id"]
+            if isinstance(existing, dict) and "$in" in existing:
+                base = set(existing["$in"])
+            elif isinstance(existing, dict) and "$eq" in existing:
+                base = {existing["$eq"]}
+            else:
+                base = {existing}
+            host_q["bk_host_id"] = {"$in": [hid for hid in candidate_ids if hid in base]}
+        else:
+            host_q["bk_host_id"] = {"$in": candidate_ids}
 
     return host_q
 
