@@ -1374,31 +1374,81 @@ def usercustom_default_search():
 @admin_bp.route('/find/objecttopo/scope_type/global/scope_id/0', methods=['POST'])
 def find_object_topo():
     try:
-        data = {
-            "info": [
-                {
-                    "bk_obj_id": "biz",
-                    "bk_inst_id": 0,
-                    "bk_inst_name": "业务",
-                    "children": [
-                        {
-                            "bk_obj_id": "set",
-                            "bk_inst_id": 0,
-                            "bk_inst_name": "集群",
-                            "children": [
-                                {
-                                    "bk_obj_id": "module",
-                                    "bk_inst_id": 0,
-                                    "bk_inst_name": "模块",
-                                    "children": []
-                                }
-                            ]
-                        }
-                    ]
-                }
-            ]
-        }
-        return make_response(data=data)
+        req_data = {}
+        if request.is_json:
+            req_data = request.get_json() or {}
+        bk_supplier_account = req_data.get('bk_supplier_account', '0')
+
+        obj_des_coll = get_mongo_collection('cc_ObjDes')
+        obj_asst_coll = get_mongo_collection('cc_ObjAsst')
+        asst_des_coll = get_mongo_collection('cc_AsstDes')
+
+        # 关联类型定义：bk_asst_id -> id（供前端 getAsstDetail 用 bk_asst_inst_id 匹配方向/名称）
+        # 注意：cc_ObjAsst.id 与 cc_AsstDes.id 是两套自增序列，不能直接混用，
+        # 需通过 bk_asst_id 把关联实例映射到其关联类型定义的 id。
+        asst_des_docs = list(asst_des_coll.find(
+            {"bk_supplier_account": bk_supplier_account}, {"_id": 0, "id": 1, "bk_asst_id": 1}
+        ))
+        asst_des_id_map = {d["bk_asst_id"]: d.get("id") for d in asst_des_docs}
+
+        models = list(obj_des_coll.find(
+            {"bk_supplier_account": bk_supplier_account}, {"_id": 0}
+        ))
+        obj_assts = list(obj_asst_coll.find(
+            {"bk_supplier_account": bk_supplier_account}, {"_id": 0}
+        ))
+        asst_by_obj = {}
+        for a in obj_assts:
+            asst_by_obj.setdefault(a.get("bk_obj_id"), []).append(a)
+
+        def extract_xy(position):
+            """DB 的 position 实际以 JSON 字符串存储，如
+            '{"bk_host_manage":{"x":-600,"y":-650}}'；也可能是 dict、null 或空串。
+            统一提取为 {x, y} 供前端 node.position.x / node.position.y 使用。"""
+            if position is None:
+                return {"x": None, "y": None}
+            if isinstance(position, str):
+                s = position.strip()
+                if not s:
+                    return {"x": None, "y": None}
+                try:
+                    position = json.loads(s)
+                except Exception:
+                    return {"x": None, "y": None}
+            if not isinstance(position, dict):
+                return {"x": None, "y": None}
+            if "x" in position and "y" in position:
+                return {"x": position.get("x"), "y": position.get("y")}
+            vals = [v for v in position.values() if isinstance(v, dict) and "x" in v]
+            if vals:
+                return {"x": vals[0].get("x"), "y": vals[0].get("y")}
+            return {"x": None, "y": None}
+
+        nodes = []
+        for m in models:
+            obj_id = m.get("bk_obj_id")
+            position = extract_xy(m.get("position"))
+            node_assts = []
+            for a in asst_by_obj.get(obj_id, []):
+                asst_type_id = asst_des_id_map.get(a.get("bk_asst_id"))
+                node_assts.append({
+                    "bk_asst_inst_id": asst_type_id,
+                    "bk_obj_id": a.get("bk_asst_obj_id"),
+                    "bk_inst_id": a.get("id"),
+                })
+            nodes.append({
+                "bk_obj_id": obj_id,
+                "bk_inst_id": m.get("id", 0),
+                "node_name": m.get("bk_obj_name", obj_id),
+                "bk_obj_icon": m.get("bk_obj_icon", ""),
+                "ispre": m.get("ispre", False),
+                "node_type": m.get("bk_obj_type") or "",
+                "bk_classification_id": m.get("bk_classification_id", ""),
+                "position": position,
+                "assts": node_assts,
+            })
+
+        return make_response(data=nodes)
     except Exception as e:
         import traceback
         traceback.print_exc()

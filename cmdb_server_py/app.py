@@ -10,6 +10,7 @@ from app.routes.auth_routes import auth_bp
 from app.routes.set_routes import set_bp
 from app.routes.module_routes import module_bp
 from app.routes.model_routes import model_bp
+from app.routes.host_routes import dynamic_group_bp
 from app.models.db import list_collections, get_collection_count, is_mongo_available
 
 app = Flask(__name__)
@@ -38,6 +39,8 @@ app.register_blueprint(set_bp, url_prefix='/api/v3')
 app.register_blueprint(module_bp, url_prefix='/api/v3')
 # 模型管理模块（拓扑/属性/分类/关联/唯一规则/属性分组）门面层，复用 /api/v3 前缀
 app.register_blueprint(model_bp, url_prefix='/api/v3')
+# 动态主机分组（Dynamic Group）接口，复用 /api/v3 前缀
+app.register_blueprint(dynamic_group_bp, url_prefix='/api/v3')
 
 
 def verify_db():
@@ -53,6 +56,12 @@ def verify_db():
             fixed = _model_core.normalize_custom_model_ispre()
             if fixed:
                 print(f"[DB] 自愈：归一化 {fixed} 个自定义模型属性的 ispre=True→False")
+            # 自愈：为存量「非内置」模型补齐/纠正默认属性（bk_inst_name / 主线 bk_parent_id），
+            # 对齐 Go createDefaultAttrs。缺失则注入；被 normalize_custom_model_ispre 误清零
+            # 的 ispre 则纠正回 True（否则自定义模型实例名属性失去保护、前端显示「未初始化」）。
+            fixed2 = _model_core.ensure_all_models_default_attributes()
+            if fixed2:
+                print(f"[DB] 自愈：为 {fixed2} 个模型补齐/纠正默认属性（bk_inst_name / bk_parent_id）")
         except Exception as e:  # 自愈失败不应阻断启动
             print(f"[DB] 警告: ispre 归一化跳过: {e}")
     else:

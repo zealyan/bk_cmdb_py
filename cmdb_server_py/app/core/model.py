@@ -147,7 +147,124 @@ def create_model(params):
     doc.setdefault("bk_ispaused", False)
     doc.setdefault("ispre", False)
     _coll(BK_TABLE_NAME_OBJ_DES).insert_one(doc)
+    # 对齐 Go createDefaultAttrs：建模型同时注入「实例名」等内置默认属性，
+    # 否则前端实例表单缺少「实例名称」字段、无法新增实例（见 ensure_model_default_attributes）。
+    ensure_model_default_attributes(bk_obj_id, supplier, is_mainline=False)
     return _strip(doc)
+
+
+def ensure_model_default_attributes(bk_obj_id, supplier=DEFAULT_SUPPLIER, is_mainline=False):
+    """对齐 Go ``createDefaultAttrs``：建模型时自动注入内置默认属性（幂等 + 自愈纠正）。
+
+    Go 在 ``CreateObject`` / ``CreateMainlineAssociation`` 时**必为每模型注入**：
+      - ``bk_inst_name``（实例名，ispre/isonly/is_required=true，singlechar）：
+        即 ``GetInstNameField(objID)``，自定义模型恒为 ``bk_inst_name``；
+      - ``bk_parent_id``（仅主线模型，ispre/isonly/is_required=true，int）。
+
+    本函数具备 **「确保」语义**：
+      - 属性不存在 → 插入（注入）；
+      - 属性已存在但标志位被 ``normalize_custom_model_ispre`` 或人工误改 → 纠正为期望值
+        （保证 ``bk_inst_name`` 始终 ``ispre/isrequired/isonly=True``，匹配 Go 语义，
+        前端才会把它当受保护的实例名属性，而非「未初始化」的可删普通字段）。
+
+    返回本次新增/纠正的属性条数（用于启动日志统计）。
+    """
+    conn = get_db_connection()
+    if conn is None:
+        return 0
+    att_coll = _coll(BK_TABLE_NAME_OBJ_ATT_DES)
+    changed = 0
+
+    def _ensure(pid, pname, ptype, isrequired, isonly, ispre, issystem):
+        nonlocal changed
+        existing = att_coll.find_one({"bk_obj_id": bk_obj_id, "bk_supplier_account": supplier,
+                                      "bk_property_id": pid})
+        desired = {
+            "bk_property_name": pname,
+            "bk_property_type": ptype,
+            "bk_property_group": "default",
+            "creator": "system",
+            "isrequired": isrequired,
+            "isonly": isonly,
+            "ispre": ispre,
+            "editable": True,
+            "isreadonly": False,
+            "bk_isapi": False,
+            "bk_issystem": issystem,
+        }
+        if existing is None:
+            doc = {
+                "id": _new_id(conn, BK_TABLE_NAME_OBJ_ATT_DES),
+                "bk_obj_id": bk_obj_id,
+                "bk_supplier_account": supplier,
+                "bk_biz_id": 0,
+                "bk_property_id": pid,
+                "bk_property_index": -1,
+                "create_time": _now(),
+                "last_time": _now(),
+            }
+            doc.update(desired)
+            att_coll.insert_one(doc)
+            changed += 1
+        else:
+            # 纠正已存在但被误改的标志位（防止 normalize_custom_model_ispre 误伤）
+            fix = {k: v for k, v in desired.items() if existing.get(k) != v}
+            if fix:
+                att_coll.update_one({"_id": existing["_id"]}, {"$set": fix})
+                changed += 1
+
+    # 实例名：所有模型必注入（自定义模型 GetInstNameField 返回 bk_inst_name）
+    _ensure("bk_inst_name", "实例名", "singlechar", True, True, True, False)
+    # 主线模型额外注入父级 ID
+    if is_mainline:
+        _ensure("bk_parent_id", "bk_parent_id", "int", True, True, True, True)
+
+    # 确保「default」属性分组存在（否则 bk_inst_name 的 bk_property_group="default"
+    # 指向不存在的分组，前端按分组渲染字段时将跳过该属性，模型详情页无任何字段可显示）。
+    group_coll = _coll(BK_TABLE_NAME_PROPERTY_GROUP)
+    if not group_coll.find_one({"bk_obj_id": bk_obj_id, "bk_supplier_account": supplier, "bk_group_id": "default"}):
+        group_coll.insert_one({
+            "id": _new_id(conn, BK_TABLE_NAME_PROPERTY_GROUP),
+            "bk_obj_id": bk_obj_id,
+            "bk_supplier_account": supplier,
+            "bk_biz_id": 0,
+            "bk_group_id": "default",
+            "bk_group_name": "基础信息",
+            "bk_group_index": 1,
+            "bk_isdefault": True,
+            "ispre": False,
+            "is_collapse": False,
+            "create_time": _now(),
+            "last_time": _now(),
+        })
+        changed += 1
+
+    return changed
+
+
+def ensure_all_models_default_attributes():
+    """启动自愈：为所有「非内置」模型补齐/纠正默认属性（bk_inst_name / 主线 bk_parent_id）。
+
+    Python 旧版本建模型未注入默认属性，导致存量自定义/主线模型缺 bk_inst_name，
+    实例表单无名称字段、无法新增实例；或 ``normalize_custom_model_ispre`` 误把
+    bk_inst_name 的 ispre 清零。本函数对每个模型调用 ``ensure_model_default_attributes``
+    （具备「确保」语义：缺失则注入、存在但标志位错误则纠正），返回发生变更的模型数。
+    """
+    conn = get_db_connection()
+    if conn is None:
+        return 0
+    obj_coll = _coll(BK_TABLE_NAME_OBJ_DES)
+    asst_coll = _coll(BK_TABLE_NAME_OBJ_ASST)
+    fixed = 0
+    for obj in obj_coll.find({"bk_obj_id": {"$nin": list(BUILTIN_MODEL_IDS)}}):
+        oid = obj.get("bk_obj_id")
+        supplier = obj.get("bk_supplier_account") or DEFAULT_SUPPLIER
+        # 是否主线：存在 bk_mainline 关联即为主线模型
+        is_mainline = asst_coll.find_one(
+            {"bk_obj_id": oid, "bk_supplier_account": supplier, "bk_asst_id": "bk_mainline"}) is not None
+        if ensure_model_default_attributes(oid, supplier, is_mainline) > 0:
+            fixed += 1
+    return fixed
 
 
 def update_model(rid, params):
@@ -252,13 +369,22 @@ def normalize_custom_model_ispre():
     isrequired —— 表现为「修改模型属性必填/非必填，提交数据不生效」。
 
     内置模型（biz/host/set/module/process/plat/cloud_area/bk_biz_set_obj）的 ispre 保持原值。
-    本函数仅对 ispre=True 且 bk_obj_id 非内置的属性做 $set，重复执行幂等（命中数为 0 时为空操作）。
+
+    ⚠️ 关键约束：必须排除系统内置默认属性 ``bk_inst_name``（实例名）与主线模型的
+    ``bk_parent_id``。这两个字段由 ``ensure_model_default_attributes`` 对齐 Go
+    ``createDefaultAttrs`` 注入，且 **必须** ``ispre=True``（前端 ``disabledConfig``
+    硬编码保护 ``bk_inst_name`` 不可删除/不可改名）。若此处把它们也归一为 False，
+    自定义模型（如 ios）的实例名属性会失去保护、前端显示「未初始化」。
     """
     conn = get_db_connection()
     if conn is None:
         return 0
     coll = _coll(BK_TABLE_NAME_OBJ_ATT_DES)
-    query = {"ispre": True, "bk_obj_id": {"$nin": list(BUILTIN_MODEL_IDS)}}
+    query = {
+        "ispre": True,
+        "bk_obj_id": {"$nin": list(BUILTIN_MODEL_IDS)},
+        "bk_property_id": {"$nin": ["bk_inst_name", "bk_parent_id"]},
+    }
     result = coll.update_many(query, {"$set": {"ispre": False}})
     return result.modified_count
 

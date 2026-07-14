@@ -3,7 +3,7 @@ from datetime import datetime
 from flask import Blueprint, jsonify, request, g
 from app.models.db import db, get_db_connection, get_mongo_collection, next_sequence
 from app.config import Config
-from app.core.model import ModelError
+from app.core.model import ModelError, ensure_model_default_attributes
 
 object_bp = Blueprint('object', __name__)
 
@@ -540,10 +540,13 @@ def _query_object_attr_by_obj_ids(obj_ids):
             "unit": doc.get("unit", ""),
             "placeholder": doc.get("placeholder", ""),
             "editable": doc.get("editable", True),
-            "ispre": doc.get("is_pre", False),
-            "isrequired": doc.get("is_required", False),
+            # 字段名兼容：Go 规范字段为无下划线的 ispre/isrequired/isonly；
+            # 部分 initdb 文档带有遗留的 is_pre/is_required/is_only（且常与规范字段值冲突），
+            # 优先取规范字段，缺失时回退到遗留字段，避免 bk_inst_name 等内置属性被误读成 False。
+            "ispre": doc.get("ispre", doc.get("is_pre", False)),
+            "isrequired": doc.get("isrequired", doc.get("is_required", False)),
             "isreadonly": doc.get("isreadonly", doc.get("is_readonly", False)),
-            "isonly": doc.get("is_only", False),
+            "isonly": doc.get("isonly", doc.get("is_only", False)),
             "bk_issystem": doc.get("bk_issystem", doc.get("bk_is_system", False)),
             "bk_isapi": doc.get("bk_isapi", doc.get("bk_is_api", False)),
             "option": doc.get("option", ""),
@@ -688,6 +691,269 @@ def find_topo_model_mainline():
         return make_response(data=topo_data)
     except Exception as e:
         print(f"获取拓扑主线模型失败: {e}")
+        import traceback
+        traceback.print_exc()
+        return make_response(result=False, code=500, message=str(e))
+
+
+def _calc_mainline_position(parent):
+    """根据父模型 position 计算新建主线模型的位置（放在父模型右侧 300px）。
+
+    cc_ObjDes.position 在 DB 中为 JSON 字符串，如 '{"bk_host_manage":{"x":-600,"y":-650}}'，
+    需先 json.loads 再取嵌套的 x/y；新节点用其自身分类 key 包装回去，供前端 node.position.x/y 读取。
+    """
+    px, py = 0, 0
+    raw = (parent or {}).get("position")
+    if isinstance(raw, str):
+        s = raw.strip()
+        if s:
+            try:
+                raw = json.loads(s)
+            except Exception:
+                raw = None
+    if isinstance(raw, dict):
+        if "x" in raw and "y" in raw:
+            px, py = raw.get("x") or 0, raw.get("y") or 0
+        else:
+            vals = [v for v in raw.values() if isinstance(v, dict) and "x" in v]
+            if vals:
+                px, py = vals[0].get("x") or 0, vals[0].get("y") or 0
+    new_x = (px or 0) + 300
+    new_y = (py or 0)
+    return json.dumps({"bk_uncategorized": {"x": new_x, "y": new_y}})
+
+
+def _propagate_mainline_inst(conn, supplier, bk_obj_id, bk_obj_name, parent_obj_id, child_obj_id, now):
+    """对齐 Go inst.SetMainlineInstAssociation：批量把存量业务拓扑挂到新主线节点下。
+
+    批处理策略与 Go 一致（**非逐业务查改**，而是）：
+        A) 一次查询取回全部父实例（parent 实例，这里为 biz / 上层自定义主线实例）；
+           为每个父实例建 1 个新主线对象实例，并记录 旧父实例 id -> 新实例 id 的映射
+           new_parent_current_map；
+        B) 一次 $in 查询取回全部直属子级（排除空闲机池），而非每个父实例各查一次；
+        C) 在内存把子级按「新父实例 id」分组，每组仅 1 次批量 update_many（$in 子级 id），
+           把子级 bk_parent_id 从旧父 id 改为新实例 id。
+    整个过程同步阻塞（与 Go 一致），无 goroutine / 无事务回滚；Go 的并发仅存在于
+    读侧主机/服务实例计数（fillStatistics 路径），与本写路径无关。
+
+    实例名清洗对齐 Go mainlineSpecialCharacterRegexp：剥离 `# / , > < |`。
+    集合/字段命名遵循本仓库 get_inst_collection_name / get_inst_id_field
+    （对齐 bk-cmdb common/tablenames.go GetInstTableName）：内置对象用独立大写集合
+    （如 cc_SetBase），自定义/通用对象用分片集合 cc_ObjectBase_0_pub_<obj_id>，主键
+    bk_inst_id、名称 bk_inst_name。
+    """
+    import re as _re
+    # 实例名清洗（对齐 Go：剥离 # / , > < |）
+    instance_name = _re.sub(r'[#/,><|]', '', bk_obj_name or '')
+
+    # 新主线对象实例：自定义对象 → cc_ObjectBase_0_pub_<bk_obj_id>，主键 bk_inst_id，名称 bk_inst_name
+    inst_coll_name = get_inst_collection_name(bk_obj_id)
+    inst_coll = conn[inst_coll_name]
+    inst_id_field = get_inst_id_field(bk_obj_id)   # 自定义对象恒为 bk_inst_id
+    inst_name_field = 'bk_inst_name'
+
+    # 确保实例表存在（Go CreateObject 会建表 + 唯一索引）
+    try:
+        inst_coll.create_index([(inst_id_field, 1)], unique=True)
+    except Exception:
+        pass
+
+    parent_coll = conn[get_inst_collection_name(parent_obj_id)]
+
+    # 步骤 A：一次取回全部父实例，逐父实例建新实例并记录 old_parent_id -> new_inst_id 映射
+    # 投影须含 bk_biz_id（对齐 Go：非 biz 父级时要把 bk_biz_id 透传到新实例，
+    # 否则会错误回退成父实例 id 本身）
+    new_parent_current_map = {}
+    parent_ids = []
+    for parent in parent_coll.find({"bk_supplier_account": supplier},
+                                   {get_inst_id_field(parent_obj_id): 1, "bk_biz_id": 1, "_id": 0}):
+        parent_id = parent.get(get_inst_id_field(parent_obj_id))
+        if parent_id is None:
+            continue
+        parent_ids.append(parent_id)
+        new_inst_id = next_sequence(conn, inst_coll_name)
+        inst_doc = {
+            inst_id_field: new_inst_id,
+            inst_name_field: instance_name,
+            "bk_obj_id": bk_obj_id,
+            "bk_biz_id": parent.get("bk_biz_id", parent_id),
+            "bk_parent_id": parent_id,
+            "bk_supplier_account": supplier,
+            "bk_ispaused": False,
+            "bk_ishidden": False,
+            "default": 0,
+            "creator": "admin",
+            "create_time": now,
+            "last_time": now,
+            "description": "",
+        }
+        inst_coll.insert_one(inst_doc)
+        new_parent_current_map[parent_id] = new_inst_id
+
+    # 无子级则提前结束（与 Go 一致，新实例已建好）
+    child_base = conn[get_inst_collection_name(child_obj_id)] if child_obj_id else None
+    if child_base is None or not parent_ids:
+        return
+
+    child_id_field = get_inst_id_field(child_obj_id)
+
+    # 步骤 B：一次 $in 取回全部直属子级（set 子级排除空闲机池），而非逐父实例查
+    child_filter = {"bk_parent_id": {"$in": parent_ids}}
+    if child_obj_id == 'set':
+        child_filter["default"] = {"$ne": 1}
+    children = list(child_base.find(
+        child_filter, {child_id_field: 1, "bk_parent_id": 1, "_id": 0}))
+
+    # 步骤 C：内存分组，子级按「新父实例 id」聚组（对齐 Go expectParent2Children）
+    expect_parent_2_children = {}
+    for child in children:
+        old_parent_id = child.get("bk_parent_id")
+        new_parent_id = new_parent_current_map.get(old_parent_id)
+        if new_parent_id is None:
+            continue
+        child_id = child.get(child_id_field)
+        if child_id is None:
+            continue
+        expect_parent_2_children.setdefault(new_parent_id, []).append(child_id)
+
+    # 每组一次批量更新（$in 子级 id），对齐 Go setMainlineParentInst
+    for new_parent_id, child_ids in expect_parent_2_children.items():
+        if not child_ids:
+            continue
+        child_base.update_many(
+            {child_id_field: {"$in": child_ids}},
+            {"$set": {"bk_parent_id": new_parent_id, "last_time": now}}
+        )
+
+
+@object_bp.route('/create/topomodelmainline', methods=['POST'])
+def create_topo_model_mainline():
+    """新建拓扑主线层级 —— 模型关系页「新建层级」按钮。
+
+    前端 store: objectMainLineModule/createMainlineObject
+    -> POST /api/v3/create/topomodelmainline
+
+    入参（来自 handleCreateBusinessLevel）:
+        {
+            bk_asst_obj_id: <父模型 bk_obj_id>,   # 点击「新建层级」的节点（实际只会出现 biz）
+            bk_obj_id: <新模型 id>,
+            bk_obj_name: <新模型名>,
+            bk_obj_icon: <图标>,
+            bk_classification_id: 'bk_uncategorized',
+            bk_supplier_account: '0',
+            creator: 'admin'
+        }
+
+    逻辑（对齐 Go CreateMainlineAssociation）:
+        1) 在 cc_ObjDes 新建模型对象（ispre=False）；
+        2) 在 cc_ObjAsst 新建 bk_mainline 关联：新模型 -> 父模型；
+        3) 若父模型已有下级，把该下级关联的父级从父模型改为新模型（重链主线：parent->new->child）；
+        4) 批量重挂存量业务拓扑（对齐 Go inst.SetMainlineInstAssociation）：为每个存量业务创建
+           新主线对象实例，并把原直属子级（如 set）的 bk_parent_id 重挂到新实例。
+    """
+    try:
+        req_data = {}
+        if request.is_json:
+            req_data = request.get_json() or {}
+        supplier = req_data.get('bk_supplier_account') or '0'
+        parent_obj_id = req_data.get('bk_asst_obj_id')
+        bk_obj_id = req_data.get('bk_obj_id')
+        bk_obj_name = req_data.get('bk_obj_name')
+        if not (parent_obj_id and bk_obj_id and bk_obj_name):
+            return make_response(result=False, code=400,
+                                 message="缺少必填参数 bk_asst_obj_id / bk_obj_id / bk_obj_name")
+
+        conn = get_db_connection()
+        if conn is None:
+            return make_response(result=False, code=500, message="数据库连接失败")
+
+        obj_des_coll = get_mongo_collection('cc_ObjDes')
+        obj_asst_coll = get_mongo_collection('cc_ObjAsst')
+
+        # 父模型必须存在
+        parent = obj_des_coll.find_one(
+            {"bk_obj_id": parent_obj_id, "bk_supplier_account": supplier}, {"_id": 0})
+        if not parent:
+            return make_response(result=False, code=400,
+                                 message="父模型不存在: bk_obj_id=%s" % parent_obj_id)
+
+        # 新模型不能已存在
+        if obj_des_coll.find_one({"bk_obj_id": bk_obj_id, "bk_supplier_account": supplier}):
+            return make_response(result=False, code=400,
+                                 message="模型已存在: bk_obj_id=%s" % bk_obj_id)
+
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        position = _calc_mainline_position(parent)
+
+        # 1) 新建 cc_ObjDes
+        new_obj_id = next_sequence(conn, 'cc_ObjDes')
+        obj_doc = {
+            "id": new_obj_id,
+            "bk_supplier_account": supplier,
+            "bk_obj_id": bk_obj_id,
+            "bk_obj_name": bk_obj_name,
+            "bk_obj_icon": req_data.get('bk_obj_icon') or 'icon-cc-default',
+            "bk_classification_id": req_data.get('bk_classification_id') or 'bk_uncategorized',
+            "ispre": False,
+            "bk_ishidden": False,
+            "bk_ispaused": False,
+            "creator": req_data.get('creator') or 'admin',
+            "modifier": '',
+            "create_time": now,
+            "last_time": now,
+            "description": '',
+            "position": position,
+        }
+        obj_des_coll.insert_one(obj_doc)
+
+        # 对齐 Go createDefaultAttrs：主线模型建好后注入默认属性
+        # （bk_inst_name + 主线 bk_parent_id），否则前端实例表单无「实例名称」字段。
+        ensure_model_default_attributes(bk_obj_id, supplier, is_mainline=True)
+
+        # 2) 新建 bk_mainline 关联：新模型 -> 父模型
+        asst_id = next_sequence(conn, 'cc_ObjAsst')
+        asst_doc = {
+            "id": asst_id,
+            "bk_obj_id": bk_obj_id,
+            "bk_asst_obj_id": parent_obj_id,
+            "bk_asst_id": "bk_mainline",
+            "bk_obj_asst_id": "%s_bk_mainline_%s" % (bk_obj_id, parent_obj_id),
+            "bk_obj_asst_name": "",
+            "bk_supplier_account": supplier,
+            "ispre": False,
+            "mapping": "1:1",
+            "on_delete": "none",
+            "creator": req_data.get('creator') or 'admin',
+            "create_time": now,
+            "last_time": now,
+        }
+        obj_asst_coll.insert_one(asst_doc)
+
+        # 3) 重链：父模型已有下级时，把该下级的父级改为新模型
+        existing_child_asst = obj_asst_coll.find_one({
+            "bk_asst_id": "bk_mainline",
+            "bk_asst_obj_id": parent_obj_id,
+            "bk_obj_id": {"$ne": bk_obj_id},
+            "bk_supplier_account": supplier,
+        })
+        child_obj_id = existing_child_asst.get("bk_obj_id") if existing_child_asst else None
+        if existing_child_asst:
+            obj_asst_coll.update_one(
+                {"_id": existing_child_asst["_id"]},
+                {"$set": {
+                    "bk_asst_obj_id": bk_obj_id,
+                    "bk_obj_asst_id": "%s_bk_mainline_%s" % (child_obj_id, bk_obj_id),
+                    "last_time": now,
+                }}
+            )
+
+        # 4) 批量重挂存量业务拓扑（对齐 Go inst.SetMainlineInstAssociation）
+        _propagate_mainline_inst(conn, supplier, bk_obj_id, bk_obj_name,
+                                 parent_obj_id, child_obj_id, now)
+
+        obj_doc.pop("_id", None)
+        return make_response(data=obj_doc)
+    except Exception as e:
         import traceback
         traceback.print_exc()
         return make_response(result=False, code=500, message=str(e))
