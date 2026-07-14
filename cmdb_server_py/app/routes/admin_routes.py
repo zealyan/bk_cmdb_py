@@ -1340,10 +1340,12 @@ def create_inst_association():
 @admin_bp.route('/delete/instassociation/<obj_id>/<asst_id>', methods=['DELETE'])
 def delete_inst_association(obj_id, asst_id):
     # 说明：一条逻辑关联在 MongoDB 中以 4 条配对文档存储（正向/反向视角 × 源/目标分表），
-    # 但前端关联 tab 会用「source + target」两次查询把同一条关联渲染成【两行】。
-    # 因此删除其中任一行时，下方 delete_many($or) 会一次性清掉全部 4 条配对文档，
-    # 列表中另一行实际已被删除。为避免用户再次点击残留行时报 404，此处对删除做【幂等】处理：
-    #   参考文档已不存在 → 直接视为删除成功（关联早已被清掉），返回 200 而非 404。
+    # 但前端关联 tab / 新增关联弹出框会用「source + target」两次查询把同一条关联渲染成【两行】。
+    # 删除其中任一行时，下方 delete_many($or) 会一次性清掉全部 4 条配对文档。
+    # 注意：前端弹窗（cancelAssociation）传入的 objId 为当前模型，但列表行 id 可能落在
+    # 【对方模型】的分表（4-doc 设计下不同视角文档存于不同分表）。因此若仅在 objId 分表找不到，
+    # 需扫描所有 cc_InstAsst_0_pub_* 分表定位该 id，避免「找不到→误报成功却未删除」。
+    # 仅当所有分表都无此 id 时，才视为已删除（幂等成功）。
     try:
         conn = get_db_connection()
         if conn is None:
@@ -1353,15 +1355,27 @@ def delete_inst_association(obj_id, asst_id):
         except (ValueError, TypeError):
             return make_response(result=False, code=400,
                                  message="非法的关联ID: %s" % asst_id)
-        # 1. 在当前模型分表定位参考文档（前端列表行的 id 均落在该分表内）
         tbl_obj = get_inst_asst_collection_name(obj_id)
+        # 1. 先在当前模型分表定位参考文档
         doc = get_mongo_collection(tbl_obj).find_one({"id": aid}, {"_id": 0})
+        # 2. 若未找到，扫描所有关联分表（兼容 id 落在对方分表的情况）
         if not doc:
-            # 幂等成功：该行关联可能已随另一侧被删除（前端列表残留），目标状态已达成
+            for cname in conn.list_collection_names():
+                if cname.startswith("cc_InstAsst_0_pub_"):
+                    d = get_mongo_collection(cname).find_one({"id": aid}, {"_id": 0})
+                    if d:
+                        doc = d
+                        break
+        if not doc:
+            # 幂等成功：关联确实不存在（可能已被其它操作清除），目标状态已达成
             return make_response(data={})
         A, B = doc.get("bk_inst_id"), doc.get("bk_asst_inst_id")
         asst_type = doc.get("bk_obj_asst_id")
-        # 2. 从「当前模型分表」与「关联对方分表」删除全部 4 条配对文档
+        # 3. 一条关联的全部 4 条文档分布在两张分表：cc_InstAsst_0_pub_{bk_obj_id}
+        #    与 cc_InstAsst_0_pub_{bk_asst_obj_id}。必须用文档自身的这两个字段对称地
+        #    确定两张表（不能只用 URL 的 obj_id 或 doc.bk_asst_obj_id 之一，否则当
+        #    host 是关联「目标」(bk_asst_obj_id=host) 时，对方表会被算成同表，导致
+        #    另一张分表永不清空 → 数据残留、提示成功却未真正删除）。
         q = {
             "bk_obj_asst_id": asst_type,
             "$or": [
@@ -1369,9 +1383,10 @@ def delete_inst_association(obj_id, asst_id):
                 {"bk_inst_id": B, "bk_asst_inst_id": A},
             ]
         }
-        get_mongo_collection(tbl_obj).delete_many(q)
-        get_mongo_collection(get_inst_asst_collection_name(
-            doc.get("bk_asst_obj_id", ""))).delete_many(q)
+        tbl_a = get_inst_asst_collection_name(doc.get("bk_obj_id", ""))
+        tbl_b = get_inst_asst_collection_name(doc.get("bk_asst_obj_id", ""))
+        get_mongo_collection(tbl_a).delete_many(q)
+        get_mongo_collection(tbl_b).delete_many(q)
         return make_response(data={})
     except Exception as e:
         import traceback; traceback.print_exc()
