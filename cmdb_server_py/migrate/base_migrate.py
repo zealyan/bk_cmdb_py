@@ -177,19 +177,36 @@ class ObjectDesMigrate(BaseMigrate):
 
     def migrate(self) -> None:
         self.ensure_collection("cc_ObjDes")
-        for item in self.OBJECTS:
-            self.upsert("cc_ObjDes", item, ["bk_obj_id", "bk_supplier_account"])
+        for idx, item in enumerate(self.OBJECTS, start=1):
+            data = {**item}
+            # 使用 insert_if_not_exists + update 组合：仅新文档设置 id
+            query = {"bk_obj_id": item["bk_obj_id"], "bk_supplier_account": item.get("bk_supplier_account", "0")}
+            existing = self.db["cc_ObjDes"].find_one(query)
+            if existing:
+                # 已有文档只更新业务字段，不覆盖 id
+                data.pop("id", None)
+                self.db["cc_ObjDes"].update_one(query, {"$set": data})
+            else:
+                data["id"] = idx
+                self.db["cc_ObjDes"].insert_one(data)
 
 
 class SystemMigrate(BaseMigrate):
-    """系统配置迁移 - 对应 Go addSystemData"""
+    """系统配置 + 迁移版本记录
+    - host_cross_biz: 业务配置标志（app 使用）
+    - migrate_version: 迁移版本记录，用于幂等追踪
+    """
 
     def migrate(self) -> None:
         self.ensure_collection("cc_System")
-        system_config = {
-            "host_cross_biz": False,
-        }
-        self.insert_if_not_exists("cc_System", system_config, ["host_cross_biz"])
+        # 业务配置标志
+        self.insert_if_not_exists("cc_System", {"host_cross_biz": False}, ["host_cross_biz"])
+        # 迁移版本记录（Go 用 cc_System 做版本追踪）
+        self.insert_if_not_exists("cc_System", {
+            "flag": "migrate_version",
+            "version": "v3.0.0",
+            "description": "基础 seed 对齐 Go v3.0.8 addPresetObjects",
+        }, ["flag", "version"])
 
 
 class PlatMigrate(BaseMigrate):

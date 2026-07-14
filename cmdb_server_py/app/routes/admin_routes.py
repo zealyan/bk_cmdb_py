@@ -424,6 +424,7 @@ def biz_set_delete():
 # 用户自定义接口
 @admin_bp.route('/api/v3/usercustom/user/search', methods=['POST'])
 def usercustom_search():
+    """查询用户自定义配置 — 当前返回空（前端接手默认值）。"""
     try:
         return make_response(data={"info": []})
     except Exception as e:
@@ -432,10 +433,41 @@ def usercustom_search():
 
 @admin_bp.route('/api/v3/usercustom/default/model', methods=['POST'])
 def usercustom_default_model():
+    """默认模型自定义配置。"""
     try:
         return make_response(data={})
     except Exception as e:
         return make_response(result=False, code=500, message=str(e))
+
+
+# ---- usercustom 完整持久化实现 ----
+
+USER_CUSTOM_COLL = "cc_UserCustom"
+
+
+def _usercustom_load(user, name="default"):
+    """从 cc_UserCustom 加载用户自定义配置。"""
+    from app.models.db import get_db_connection
+    conn = get_db_connection()
+    if conn is None:
+        return None
+    return conn[USER_CUSTOM_COLL].find_one({"user": user, "name": name}, {"_id": 0})
+
+
+def _usercustom_save(user, name, content):
+    """保存用户自定义配置到 cc_UserCustom（upsert）。"""
+    from app.models.db import get_db_connection
+    conn = get_db_connection()
+    if conn is None:
+        return False
+    from datetime import datetime
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    conn[USER_CUSTOM_COLL].update_one(
+        {"user": user, "name": name},
+        {"$set": {"user": user, "name": name, "content": content, "last_time": now_str}},
+        upsert=True,
+    )
+    return True
 
 
 # 全局配置API
@@ -452,8 +484,18 @@ def find_platformadmin_config():
 @admin_bp.route('/api/v3/find/usercustom', methods=['POST'])
 @admin_bp.route('/find/usercustom', methods=['POST'])
 def find_usercustom():
+    """加载用户自定义配置（前端页面加载时调用）。"""
     try:
-        return make_response(data={"info": []})
+        req_data = {}
+        if request.is_json:
+            req_data = request.get_json() or {}
+        user = req_data.get("user", req_data.get("bk_user", "admin"))
+        doc = _usercustom_load(user)
+        if doc and doc.get("content"):
+            info = [{"name": "default", "content": doc["content"]}]
+        else:
+            info = []
+        return make_response(data={"info": info})
     except Exception as e:
         return make_response(result=False, code=500, message=str(e))
 
@@ -461,8 +503,18 @@ def find_usercustom():
 @admin_bp.route('/api/v3/search/usercustom', methods=['POST'])
 @admin_bp.route('/search/usercustom', methods=['POST'])
 def search_usercustom():
+    """搜索用户自定义配置。"""
     try:
-        return make_response(data={"info": []})
+        req_data = {}
+        if request.is_json:
+            req_data = request.get_json() or {}
+        user = req_data.get("user", req_data.get("bk_user", "admin"))
+        doc = _usercustom_load(user)
+        if doc and doc.get("content"):
+            info = [{"name": "default", "content": doc["content"]}]
+        else:
+            info = []
+        return make_response(data={"info": info})
     except Exception as e:
         return make_response(result=False, code=500, message=str(e))
 
@@ -747,33 +799,30 @@ def find_service_template_sync_status(bk_biz_id):
 @admin_bp.route('/api/v3/find/object', methods=['POST'])
 @admin_bp.route('/find/object', methods=['POST'])
 def find_object():
+    """查询对象模型定义（兼容前端旧版调用，委托给 model_routes 的核心逻辑）。"""
+    from app.core import model as core
     try:
         req_data = request.get_json() or {}
-        bk_obj_id = req_data.get('bk_obj_id', '')
-        
-        objects = []
-        # 修复：对象模型定义由 initdb 写入 cc_ObjDes（共 11 个），cc_ObjectBase 为空集合；
-        # 之前误读 cc_ObjectBase 导致 find/object 返回空。
-        collection = get_mongo_collection('cc_ObjDes')
-        docs = collection.find({})
-        # 简单的排序
-        docs_sorted = sorted(docs, key=lambda x: x.get("id", 0))
-        for doc in docs_sorted:
-            objects.append({
+        result = core.search_model(req_data)
+        # 保持旧版格式：data.info + 补全前端需要的字段
+        info = []
+        for doc in (result.get("info") or []):
+            info.append({
                 "id": doc.get("id"),
-                "bk_classification_id": doc.get("bk_classification_id"),
                 "bk_obj_id": doc.get("bk_obj_id"),
                 "bk_obj_name": doc.get("bk_obj_name"),
+                "bk_classification_id": doc.get("bk_classification_id"),
                 "bk_supplier_account": doc.get("bk_supplier_account"),
                 "bk_obj_icon": doc.get("bk_obj_icon"),
                 "is_built-in": doc.get("ispre"),
-                "is_pre": doc.get("is_pre")
+                "is_pre": doc.get("is_pre"),
+                "bk_ispaused": doc.get("bk_ispaused", False),
             })
-        
-        return make_response(data={"info": objects})
+        return make_response(data={"info": info, "count": len(info)})
     except Exception as e:
         import traceback
         traceback.print_exc()
+        return make_response(result=False, code=500, message=str(e))
         return make_response(result=False, code=500, message=str(e))
 
 
@@ -1232,10 +1281,30 @@ def delete_inst_association(obj_id, asst_id):
 # 保存用户自定义配置API
 @admin_bp.route('/api/v3/usercustom', methods=['POST'])
 @admin_bp.route('/usercustom', methods=['POST'])
+@admin_bp.route('/api/v3/usercustom', methods=['POST'])
+@admin_bp.route('/usercustom', methods=['POST'])
 def save_usercustom():
+    """保存用户自定义配置到 cc_UserCustom。
+    
+    前端发送: { "usercustom": { ... }, "user": "username" }
+    或 { "content": {...}, "name": "default" }
+    """
     try:
+        req_data = {}
+        if request.is_json:
+            req_data = request.get_json() or {}
+        user = req_data.get("user", req_data.get("bk_user", "admin"))
+        
+        # 尝试提取实际内容
+        content = req_data.get("usercustom") or req_data.get("content") or req_data
+        if isinstance(content, dict) and "user" in content and len(content) == 1:
+            # 如果只有 user 字段，说明前端只传了用户名，保存空内容
+            pass
+        
+        _usercustom_save(user, "default", content)
         return make_response(data={})
     except Exception as e:
+        import traceback; traceback.print_exc()
         return make_response(result=False, code=500, message=str(e))
 
 
@@ -1243,16 +1312,28 @@ def save_usercustom():
 @admin_bp.route('/api/v3/usercustom/default/search', methods=['POST'])
 @admin_bp.route('/usercustom/default/search', methods=['POST'])
 def usercustom_default_search():
+    """搜索默认用户配置（列配置等）。"""
     try:
+        req_data = {}
+        if request.is_json:
+            req_data = request.get_json() or {}
+        user = req_data.get("user", req_data.get("bk_user", "admin"))
+        
+        # 先从已保存的用户配置中读列配置
+        doc = _usercustom_load(user)
+        saved_content = doc.get("content", {}) if doc else {}
+        
+        # 合并：已保存配置优先，否则用默认空值
         data = {
-            "recently_models": [],
-            "columns_config_business": [],
-            "columns_config_host": [],
-            "columns_config_set": [],
-            "columns_config_module": []
+            "recently_models": saved_content.get("recently_models", []),
+            "columns_config_business": saved_content.get("columns_config_business", []),
+            "columns_config_host": saved_content.get("columns_config_host", []),
+            "columns_config_set": saved_content.get("columns_config_set", []),
+            "columns_config_module": saved_content.get("columns_config_module", []),
         }
         return make_response(data=data)
     except Exception as e:
+        import traceback; traceback.print_exc()
         return make_response(result=False, code=500, message=str(e))
 
 

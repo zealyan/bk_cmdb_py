@@ -6,7 +6,7 @@
 
 from datetime import datetime
 from typing import List, Dict, Any
-from . import BaseMigrate, get_timestamp, BK_DEFAULT_OWNER_ID, BK_SYSTEM_OPERATOR
+from .. import BaseMigrate, get_timestamp, BK_DEFAULT_OWNER_ID, BK_SYSTEM_OPERATOR
 
 
 class PropertyGroupMigrate(BaseMigrate):

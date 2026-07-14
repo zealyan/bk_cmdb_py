@@ -19,6 +19,8 @@ from migrate.base_migrate import run_base_migrate
 from migrate.data.groups import run_group_migrate
 from migrate.data.attributes import run_attribute_migrate
 from migrate.data.associations import run_association_migrate
+from migrate.data.association_types import run_association_type_migrate
+from migrate.data.service_categories import run_service_category_migrate
 
 
 MONGO_URI = os.environ.get("MONGO_URI", "mongodb://localhost:27017")
@@ -59,15 +61,37 @@ def cmd_associations(db):
     run_association_migrate(db)
 
 
+def cmd_association_types(db):
+    print("=" * 50)
+    print("Migrating association types...")
+    print("=" * 50)
+    run_association_type_migrate(db)
+
+
+def cmd_service_categories(db):
+    print("=" * 50)
+    print("Migrating service categories...")
+    print("=" * 50)
+    run_service_category_migrate(db)
+
+
 def cmd_all(db):
     print("=" * 50)
-    print("Running all migrations...")
+    print("Running all migrations (module-based)...")
     print("=" * 50)
     run_base_migrate(db)
     run_group_migrate(db)
     run_attribute_migrate(db)
     run_association_migrate(db)
+    run_association_type_migrate(db)
+    run_service_category_migrate(db)
     print("\nAll migrations completed!")
+
+
+def cmd_upgrade(db):
+    """完整版本升级（对齐 Go upgrader，执行全部 63+ 个版本）。"""
+    from migrate.upgrader import run_all as run_upgrader
+    run_upgrader()
 
 
 def cmd_check(db):
@@ -97,6 +121,9 @@ def main():
     parser.add_argument("--groups", action="store_true", help="Migrate property groups")
     parser.add_argument("--attributes", action="store_true", help="Migrate attributes")
     parser.add_argument("--associations", action="store_true", help="Migrate associations")
+    parser.add_argument("--association-types", action="store_true", help="Migrate association types (cc_AsstDes)")
+    parser.add_argument("--service-categories", action="store_true", help="Migrate service categories (cc_ServiceCategory)")
+    parser.add_argument("--upgrade", action="store_true", help="Run full version upgrade pipeline (对齐 Go upgrader)")
     parser.add_argument("--all", action="store_true", help="Run all migrations")
     parser.add_argument("--check", action="store_true", help="Check database status")
     parser.add_argument("--uri", default=MONGO_URI, help="MongoDB URI")
@@ -109,6 +136,8 @@ def main():
 
     if args.all:
         cmd_all(db)
+    elif args.upgrade:
+        cmd_upgrade(db)
     elif args.init:
         cmd_init(db)
     elif args.groups:
@@ -117,6 +146,10 @@ def main():
         cmd_attributes(db)
     elif args.associations:
         cmd_associations(db)
+    elif args.association_types:
+        cmd_association_types(db)
+    elif args.service_categories:
+        cmd_service_categories(db)
     elif args.check:
         cmd_check(db)
     else:

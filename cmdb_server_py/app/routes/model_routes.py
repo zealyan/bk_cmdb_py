@@ -105,7 +105,7 @@ def api_update_objectattr_biz(biz_id, rid):
     return _wrap(core.update_model_attributes, rid, body)
 
 
-@model_bp.route('/update/objectattr/index/<obj_id>/<property_id>', methods=['PUT'])
+@model_bp.route('/update/objectattr/index/<obj_id>/<property_id>', methods=['PUT', 'POST'])
 def api_update_objectattr_index(obj_id, property_id):
     body = _parse_body()
     index = body.get("bk_property_index", body.get("index", 0))

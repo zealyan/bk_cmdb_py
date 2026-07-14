@@ -3,6 +3,7 @@ from datetime import datetime
 from flask import Blueprint, jsonify, request, g
 from app.models.db import db, get_db_connection, get_mongo_collection, next_sequence
 from app.config import Config
+from app.core.model import ModelError
 
 object_bp = Blueprint('object', __name__)
 
@@ -10,6 +11,91 @@ object_bp = Blueprint('object', __name__)
 PERMISSION_DENIED_CODE = 9900403
 
 import re as _re
+
+
+def validate_unique_constraint(obj_id, instance_data, collection_name, exclude_id=None):
+    """唯一约束校验 — 对齐 Go validator_unique.go getValidUniqueOptions。
+    
+    查询 cc_ObjectUnique 中 bk_obj_id=obj_id 的规则，对每条非空 keys 组合：
+    1. 解析 keys[].key_id → cc_ObjAttDes.id → 取 bk_property_id
+    2. 检查 instance_data 中是否包含所有相关属性
+    3. 构建 Mongo 查询条件，统计已有实例数
+    4. 若已存在（更新时排除自身），报唯一冲突错误。
+    """
+    conn = get_db_connection()
+    if conn is None:
+        return  # 数据库不可用时跳过校验
+    # 获取该对象的全部属性（用于 key_id → bk_property_id 映射）
+    att_des = list(conn["cc_ObjAttDes"].find(
+        {"bk_obj_id": obj_id},
+        {"id": 1, "bk_property_id": 1, "_id": 0}
+    ))
+    id_to_prop = {a["id"]: a["bk_property_id"] for a in att_des if "id" in a}
+    
+    # 获取该对象的唯一规则
+    unique_rules = list(conn["cc_ObjectUnique"].find(
+        {"bk_obj_id": obj_id, "keys": {"$ne": [], "$exists": True}},
+        {"keys": 1, "_id": 0}
+    ))
+    if not unique_rules:
+        return  # 无规则，跳过
+    
+    collection = conn[collection_name]
+    
+    for rule in unique_rules:
+        keys = rule.get("keys") or []
+        if not keys:
+            continue
+        # 解析 key_id → bk_property_id
+        prop_ids = []
+        for k in keys:
+            if k.get("key_kind") != "property":
+                continue
+            kid = k.get("key_id")
+            prop_id = id_to_prop.get(kid)
+            if prop_id:
+                prop_ids.append(prop_id)
+        if not prop_ids:
+            continue
+        
+        # 检查 instance_data 是否包含所有属性值
+        query_cond = {}
+        all_present = True
+        for pid in prop_ids:
+            val = instance_data.get(pid)
+            if val is None or val == "":
+                # 属性值缺失时，该规则不生效（不能用于部分匹配）
+                if len(prop_ids) == 1:
+                    all_present = False
+                    break
+                # 多属性组合时，任一缺失则整体规则不生效
+                all_present = False
+                break
+            query_cond[pid] = val
+        
+        if not all_present:
+            continue
+        
+        # 更新时排除自身
+        if exclude_id is not None:
+            id_field = "bk_inst_id"  # 通用对象主键
+            # 对内置对象用正确的 ID 字段
+            id_field_map = {"biz":"bk_biz_id","set":"bk_set_id","module":"bk_module_id",
+                           "host":"bk_host_id","process":"bk_process_id","plat":"bk_cloud_id"}
+            id_field = id_field_map.get(obj_id, "bk_inst_id")
+            query_cond[id_field] = {"$ne": exclude_id}
+        
+        count = collection.count_documents(query_cond)
+        if count > 0:
+            prop_names = []
+            for pid in prop_ids:
+                ainfo = conn["cc_ObjAttDes"].find_one(
+                    {"bk_obj_id": obj_id, "bk_property_id": pid},
+                    {"bk_property_name": 1}
+                )
+                prop_names.append(ainfo["bk_property_name"] if ainfo else pid)
+            msg = "唯一校验失败: 字段 %s 的组合值已存在" % " + ".join(prop_names)
+            raise ModelError(msg, code=11000)
 
 
 def _to_int(v):
@@ -538,60 +624,72 @@ def find_object_attr_by_obj(bk_obj_id):
 
 @object_bp.route('/find/topomodelmainline', methods=['POST'])
 def find_topo_model_mainline():
-    """获取拓扑主线模型"""
+    """获取拓扑主线模型 — 动态查询 cc_ObjAsst（bk_asst_id = bk_mainline），对齐 Go 逻辑。
+
+    Go 参考: src/scene_server/topo_server/logics/model/mainline_association.go
+    主线链由 cc_ObjAsst 中 bk_asst_id="bk_mainline" 的关联定义，
+    bk_obj_id=子级, bk_asst_obj_id=父级。
+    """
     try:
-        # 兼容多种请求数据格式
         req_data = {}
         if request.is_json:
             req_data = request.get_json() or {}
-        elif request.form:
-            req_data = request.form.to_dict()
-        elif request.data:
-            try:
-                import json
-                req_data = json.loads(request.data)
-            except:
-                req_data = {}
-        
         bk_supplier_account = req_data.get('bk_supplier_account', '0')
-        
-        # 查询业务拓扑分类下的所有对象模型（业务、集群、模块）
-        topo_data = []
-        
-        # 查询业务拓扑主线对象定义。
-        # 注意：bk-cmdb 的主线对象由 bk_obj_id 决定（而非按 bk_classification_id 过滤），
-        # host/process 等内置对象的分类在真实 bk-cmdb 中归属 bk_host_manage，
-        # 但仍必须出现在业务拓扑主线中。
-        # 修复：对象模型定义由 initdb 写入 cc_ObjDes（共 11 个），cc_ObjectBase（无 supplier 后缀）
-        # 是空集合；之前误读 cc_ObjectBase 导致业务拓扑主线返回空列表。
-        collection = get_mongo_collection('cc_ObjDes')
-        mainline_obj_ids = ['biz', 'set', 'module', 'host', 'process', 'bk_biz_set_obj']
-        topo_objects = list(collection.find(
-            {"bk_obj_id": {"$in": mainline_obj_ids}},
-            {'_id': 0}
+
+        # 1. 查询所有 bk_mainline 关联
+        asst_coll = get_mongo_collection('cc_ObjAsst')
+        mainline_assocs = list(asst_coll.find(
+            {"bk_asst_id": "bk_mainline", "bk_supplier_account": bk_supplier_account},
+            {"bk_obj_id": 1, "bk_asst_obj_id": 1, "_id": 0}
         ))
-        
-        # 定义对象的下一级关系
-        next_obj_map = {
-            "biz": "set",
-            "set": "module",
-            "module": "host"
-        }
-        
-        for obj in topo_objects:
-            obj_node = {
-                "bk_obj_id": obj.get("bk_obj_id"),
-                "bk_obj_name": obj.get("bk_obj_name"),
+        if not mainline_assocs:
+            return make_response(data=[])
+
+        # 2. 构建 parent_map: child → parent
+        #    以及反向映射 parent → child（主线链是线性的，每个 parent 至多一个 child）
+        child_to_parent = {}   # bk_obj_id(子) → bk_asst_obj_id(父)
+        parent_to_child = {}   # bk_asst_obj_id(父) → bk_obj_id(子)
+        for assoc in mainline_assocs:
+            child = assoc.get("bk_obj_id")
+            parent = assoc.get("bk_asst_obj_id")
+            child_to_parent[child] = parent
+            parent_to_child[parent] = child
+
+        all_children = set(child_to_parent.keys())
+        all_parents = set(child_to_parent.values())
+
+        # 根节点：是 parent 但不是 child
+        roots = all_parents - all_children
+        if not roots:
+            return make_response(data=[])
+        root = list(roots)[0]
+
+        # 3. 从根节点开始遍历主线链
+        obj_des_coll = get_mongo_collection('cc_ObjDes')
+        topo_data = []
+        current = root
+        while current:
+            obj_info = obj_des_coll.find_one(
+                {"bk_obj_id": current, "bk_supplier_account": bk_supplier_account},
+                {"_id": 0, "bk_obj_id": 1, "bk_obj_name": 1, "ispre": 1}
+            ) or {}
+            next_obj = parent_to_child.get(current)
+
+            topo_data.append({
+                "bk_obj_id": current,
+                "bk_obj_name": obj_info.get("bk_obj_name", current),
                 "bk_supplier_account": bk_supplier_account,
-                "is_built-in": obj.get("ispre", True),
+                "is_built-in": obj_info.get("ispre", True),
                 "default": 0,
-                "bk_next_obj": next_obj_map.get(obj.get("bk_obj_id"))
-            }
-            topo_data.append(obj_node)
-        
+                "bk_next_obj": next_obj,
+            })
+            current = next_obj  # 移至下一级
+
         return make_response(data=topo_data)
     except Exception as e:
         print(f"获取拓扑主线模型失败: {e}")
+        import traceback
+        traceback.print_exc()
         return make_response(result=False, code=500, message=str(e))
 
 
@@ -649,7 +747,9 @@ def find_classification_object():
                 "bk_supplier_account": doc.get("bk_supplier_account"),
                 "bk_obj_icon": doc.get("bk_obj_icon"),
                 "is_built-in": doc.get("ispre"),
-                "is_pre": doc.get("is_pre")
+                "is_pre": doc.get("is_pre"),
+                "bk_ispaused": doc.get("bk_ispaused", False),
+                "bk_ishidden": doc.get("bk_ishidden", False),
             })
         
         # 将对象按分类分组
@@ -868,14 +968,14 @@ def topo_internal_with_statistics_new(supplier_account, bk_biz_id):
         if conn is None:
             return make_response(result=False, code=500, message="数据库连接失败")
 
-        # 空闲机池模块的 default 值映射（按名称兜底，因部分数据缺失 bk_default 字段）
+        # 空闲机池模块的 default 值映射（按名称兜底，因部分数据缺失 default 字段）
         idle_module_default = {"空闲机": 1, "故障机": 2, "待回收": 3}
 
-        # 定位空闲机池集群：优先 bk_default==1，其次按名称“空闲机池”
+        # 定位空闲机池集群：default==1 或 bk_default==1，其次按名称“空闲机池”
         idle_set = conn.cc_SetBase.find_one({
             "bk_biz_id": bk_biz_id,
             "bk_data_status": {"$ne": "disabled"},
-            "$or": [{"bk_default": 1}, {"bk_set_name": "空闲机池"}]
+            "$or": [{"default": 1}, {"bk_default": 1}, {"bk_set_name": "空闲机池"}]
         })
         if not idle_set:
             idle_set = conn.cc_SetBase.find_one({
@@ -908,9 +1008,9 @@ def topo_internal_with_statistics_new(supplier_account, bk_biz_id):
         for m in modules:
             mid = m.get("bk_module_id")
             mname = m.get("bk_module_name", "")
-            default = m.get("bk_default")
+            default = m.get("default")
             if default is None:
-                default = idle_module_default.get(mname, 0)
+                default = m.get("bk_default") or idle_module_default.get(mname, 0)
             host_count = len([r for r in host_relations if r.get("bk_module_id") == mid])
             module_list.append({
                 "bk_module_id": mid,
@@ -1137,17 +1237,25 @@ def find_topo_inst_with_statistics(bk_biz_id):
 
         # 判断是否为空闲机池：bk_default==1 或名为“空闲机池”
         # 业务拓扑接口须排除空闲机池，否则会与 /topo/internal 接口返回并前置的空闲机池重复。
-        def _is_idle_pool(s):
-            return s.get("bk_default") == 1 or s.get("bk_set_name") == "空闲机池"
+        # Go SortTopoInst: default 排前，其余按名称排序
+        sets.sort(key=lambda x: (0 if x.get("default", x.get("bk_default", 0)) in (1, 2, 3) else 1,
+                                   x.get("bk_set_name", "") or ""))
 
-        # 构建集群节点（排除空闲机池）
+        # 构建集群节点（排除空闲机池，对齐 Go withDefault=false）
+
+        # 构建集群节点（排除空闲机池，对齐 Go withDefault=false）
         set_nodes = []
         for s in sets:
-            if _is_idle_pool(s):
+            default_val = s.get("default", s.get("bk_default", 0))
+            if default_val == 1 or s.get("bk_set_name") == "空闲机池":
                 continue
             set_id = s.get("bk_set_id")
             # 查找该集群下的所有模块
             set_modules = [m for m in modules if m.get("bk_set_id") == set_id]
+
+            # Go SortTopoInst: 按 default 排前，其余按名称
+            set_modules.sort(key=lambda x: (0 if x.get("default", x.get("bk_default", 0)) in (1, 2, 3) else 1,
+                                              x.get("bk_module_name", "") or ""))
 
             # 构建模块节点
             module_nodes = []
@@ -1391,6 +1499,13 @@ def create_instance(obj_id):
         instance_data.setdefault("create_time", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
         instance_data.setdefault("last_time", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
 
+        # 唯一约束校验（对齐 Go validator_unique.go）
+        try:
+            validate_unique_constraint(obj_id, instance_data, collection_name)
+        except ModelError as e:
+            return make_response(result=False, code=e.code if hasattr(e, 'code') else 11000,
+                                  message=str(e))
+
         result = collection.insert_one(instance_data)
 
         if result.inserted_id:
@@ -1436,6 +1551,13 @@ def update_instance(obj_id, inst_id):
             return make_response(result=False, code=500, message="无可更新字段")
         update_fields["last_time"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
+        # 唯一约束校验：更新时检查新值是否与已有实例冲突（排除自身）
+        try:
+            validate_unique_constraint(obj_id, update_fields, get_inst_collection_name(obj_id), exclude_id=inst_id)
+        except ModelError as e:
+            return make_response(result=False, code=e.code if hasattr(e, 'code') else 11000,
+                                  message=str(e))
+
         result = collection.update_one({id_field: inst_id}, {"$set": update_fields})
         if result.matched_count == 0:
             return make_response(
@@ -1446,6 +1568,160 @@ def update_instance(obj_id, inst_id):
     except Exception as e:
         import traceback
         traceback.print_exc()
+        return make_response(result=False, code=500, message=str(e))
+
+
+@object_bp.route('/delete/instance/object/<obj_id>/inst/<int:inst_id>', methods=['DELETE', 'POST'])
+def delete_instance(obj_id, inst_id):
+    """删除单个对象实例（对齐 bk-cmdb: DELETE /delete/instance/object/{bk_obj_id}/inst/{inst_id}）。"""
+    try:
+        conn = get_db_connection()
+        if conn is None:
+            return make_response(result=False, code=500, message="数据库连接失败")
+        collection_name = get_inst_collection_name(obj_id)
+        collection = get_mongo_collection(collection_name)
+        id_field = get_inst_id_field(obj_id)
+        result = collection.delete_one({id_field: inst_id})
+        if result.deleted_count == 0:
+            return make_response(result=False, code=404, message="实例不存在: %s=%s" % (id_field, inst_id))
+        return make_response(data={})
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return make_response(result=False, code=500, message=str(e))
+
+
+@object_bp.route('/api/v3/delete/instance/object/<obj_id>/inst/<int:inst_id>', methods=['DELETE', 'POST'])
+def delete_instance_with_prefix(obj_id, inst_id):
+    """带 /api/v3 前缀的删除（兼容前端旧版调用）。"""
+    return delete_instance(obj_id, inst_id)
+
+
+@object_bp.route('/deletemany/instance/object/<obj_id>', methods=['POST', 'DELETE'])
+def delete_instances(obj_id):
+    """批量删除对象实例（对齐 bk-cmdb: POST /deletemany/instance/object/{bk_obj_id}）。
+    
+    请求体: {"delete":{"inst_ids":[N,...]}} 或直接 {"inst_ids":[N,...]}
+    """
+    try:
+        req_data = _parse_body()
+        conn = get_db_connection()
+        if conn is None:
+            return make_response(result=False, code=500, message="数据库连接失败")
+        collection_name = get_inst_collection_name(obj_id)
+        collection = get_mongo_collection(collection_name)
+        id_field = get_inst_id_field(obj_id)
+        del_ids = req_data.get("inst_ids") or req_data.get("delete", {}).get("inst_ids") or []
+        if not del_ids:
+            return make_response(result=False, code=500, message="缺少 inst_ids")
+        result = collection.delete_many({id_field: {"$in": [int(x) for x in del_ids]}})
+        return make_response(data={"deleted_count": result.deleted_count})
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return make_response(result=False, code=500, message=str(e))
+
+
+# ---- 主机转移相关 API ----
+
+@object_bp.route('/host/transfer_with_auto_clear_service_instance/bk_biz_id/<int:biz_id>', methods=['POST'])
+def transfer_host(biz_id):
+    """主机转移（对齐 Go: POST /host/transfer_with_auto_clear_service_instance/bk_biz_id/{id}）。"""
+    try:
+        conn = get_db_connection()
+        if conn is None:
+            return make_response(result=False, code=500, message="数据库连接失败")
+        req_data = request.get_json() or {}
+        bk_host_ids = req_data.get("bk_host_ids") or req_data.get("bk_host_id") or []
+        default_mod = req_data.get("default_internal_module")
+        add_to = req_data.get("add_to_modules") or []
+        remove_from = req_data.get("remove_from_modules") or []
+        is_remove_all = req_data.get("is_remove_from_all", False)
+        
+        if isinstance(bk_host_ids, int):
+            bk_host_ids = [bk_host_ids]
+        if not bk_host_ids:
+            return make_response(result=False, code=500, message="缺少 bk_host_ids")
+        
+        # 目标模块
+        target_ids = []
+        if default_mod:
+            target_ids.append(int(default_mod))
+        target_ids.extend([int(x) for x in add_to])
+        
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        
+        # 对每个主机执行转移
+        for hids in [bk_host_ids[i:i+100] for i in range(0, len(bk_host_ids), 100)]:
+            for h in hids:
+                host_id = int(h)
+                # 从源模块移除
+                if is_remove_all:
+                    conn.cc_ModuleHostConfig.delete_many({"bk_host_id": host_id, "bk_biz_id": biz_id})
+                elif remove_from:
+                    conn.cc_ModuleHostConfig.delete_many({
+                        "bk_host_id": host_id, "bk_biz_id": biz_id,
+                        "bk_module_id": {"$in": [int(x) for x in remove_from]}
+                    })
+                # 添加到目标模块
+                for mod_id in target_ids:
+                    existing = conn.cc_ModuleHostConfig.find_one({
+                        "bk_host_id": host_id, "bk_module_id": mod_id, "bk_biz_id": biz_id
+                    })
+                    if not existing:
+                        conn.cc_ModuleHostConfig.insert_one({
+                            "bk_host_id": host_id, "bk_module_id": mod_id,
+                            "bk_biz_id": biz_id, "bk_supplier_account": "0",
+                            "create_time": now, "last_time": now
+                        })
+        
+        return make_response(data={"success": True})
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        return make_response(result=False, code=500, message=str(e))
+
+
+@object_bp.route('/host/transfer_with_auto_clear_service_instance/bk_biz_id/<int:biz_id>/preview', methods=['POST'])
+def transfer_host_preview(biz_id):
+    """主机转移预览 — 返回简化预览数据。"""
+    try:
+        conn = get_db_connection()
+        if conn is None:
+            return make_response(result=False, code=500, message="数据库连接失败")
+        req_data = request.get_json() or {}
+        bk_host_ids = req_data.get("bk_host_ids") or req_data.get("bk_host_id") or []
+        if isinstance(bk_host_ids, int):
+            bk_host_ids = [bk_host_ids]
+        
+        info = []
+        hosts = list(conn.cc_HostBase.find({"bk_host_id": {"$in": [int(h) for h in bk_host_ids]}}))
+        # 获取每个主机的当前模块
+        host_mods = list(conn.cc_ModuleHostConfig.find({
+            "bk_host_id": {"$in": [int(h) for h in bk_host_ids]}, "bk_biz_id": biz_id
+        }))
+        mod_ids = set(r.get("bk_module_id") for r in host_mods)
+        mod_names = {}
+        for m in conn.cc_ModuleBase.find({"bk_module_id": {"$in": list(mod_ids)}}):
+            mod_names[m["bk_module_id"]] = m.get("bk_module_name", "")
+        set_names = {}
+        for s in conn.cc_SetBase.find({"bk_biz_id": biz_id}):
+            set_names[s["bk_set_id"]] = s.get("bk_set_name", "")
+        
+        for h in hosts:
+            hid = h["bk_host_id"]
+            cur_mods = [r for r in host_mods if r["bk_host_id"] == hid]
+            to_remove = [{"bk_module_id": r["bk_module_id"], "bk_module_name": mod_names.get(r["bk_module_id"],""),
+                          "service_instances": []} for r in cur_mods]
+            info.append({
+                "bk_host_id": hid,
+                "bk_host_innerip": h.get("bk_host_innerip", ""),
+                "host_apply_plan": {"conflicts": [], "update_fields": []},
+                "to_add_to_modules": [],
+                "to_remove_from_modules": to_remove,
+            })
+        return make_response(data=info)
+    except Exception as e:
+        import traceback; traceback.print_exc()
         return make_response(result=False, code=500, message=str(e))
 
 
@@ -1526,7 +1802,7 @@ def find_business_topo_inst(bk_biz_id):
         biz_id = business.get("bk_biz_id")
         biz_name = business.get("bk_biz_name", "")
 
-        # 构建拓扑结构
+        # 构建拓扑结构（对齐 Go SearchBusinessTopo + SortTopoInst）
         topo_result = []
         
         # 添加业务节点
@@ -1535,14 +1811,19 @@ def find_business_topo_inst(bk_biz_id):
             "bk_inst_name": biz_name,
             "bk_obj_id": "biz",
             "bk_obj_name": "业务",
-            "children": []
+            "default": 0,
+            "child": []
         }
         
-        # 查询该业务下的所有集群
+        # 查询该业务下的所有集群（排除空闲机池 default=1，对齐 Go 的 withDefault=false）
         sets = list(conn.cc_SetBase.find({
             "bk_biz_id": biz_id,
-            "bk_data_status": {"$ne": "disabled"}
-        }).sort("bk_set_name", 1))
+            "bk_data_status": {"$ne": "disabled"},
+            "$or": [{"default": {"$exists": False}}, {"default": {"$ne": 1}}]
+        }))
+        # Go SortTopoInst: default!=0 排前，然后按名称排序
+        sets.sort(key=lambda x: (0 if x.get("default", 0) in (1, 2, 3) else 1,
+                                   x.get("bk_set_name", "") or ""))
         
         for s in sets:
             set_node = {
@@ -1550,7 +1831,8 @@ def find_business_topo_inst(bk_biz_id):
                 "bk_inst_name": s.get("bk_set_name", ""),
                 "bk_obj_id": "set",
                 "bk_obj_name": "集群",
-                "children": []
+                "default": s.get("default", 0),
+                "child": []
             }
             
             # 查询该集群下的所有模块
@@ -1558,7 +1840,10 @@ def find_business_topo_inst(bk_biz_id):
                 "bk_set_id": s.get("bk_set_id"),
                 "bk_biz_id": biz_id,
                 "bk_data_status": {"$ne": "disabled"}
-            }).sort("bk_module_name", 1))
+            }))
+            # Go SortTopoInst: default 排前，其余按名称
+            modules.sort(key=lambda x: (0 if x.get("default", 0) in (1, 2, 3) else 1,
+                                         x.get("bk_module_name", "") or ""))
             
             for m in modules:
                 module_node = {
@@ -1566,11 +1851,12 @@ def find_business_topo_inst(bk_biz_id):
                     "bk_inst_name": m.get("bk_module_name", ""),
                     "bk_obj_id": "module",
                     "bk_obj_name": "模块",
-                    "children": []
+                    "default": m.get("default", 0),
+                    "child": []
                 }
-                set_node["children"].append(module_node)
+                set_node["child"].append(module_node)
             
-            biz_node["children"].append(set_node)
+            biz_node["child"].append(set_node)
         
         topo_result.append(biz_node)
         

@@ -84,7 +84,7 @@ def create_module(biz_id, set_id):
         
         conn.cc_ModuleBase.insert_one(module_doc)
         
-        return make_response(data={"bk_module_id": new_id})
+        return make_response(data={"bk_module_id": new_id, "bk_module_name": bk_module_name})
     except Exception as e:
         import traceback
         traceback.print_exc()

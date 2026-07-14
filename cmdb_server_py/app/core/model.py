@@ -151,6 +151,14 @@ def create_model(params):
 
 
 def update_model(rid, params):
+    """更新模型 — 禁止停用/删除内置模型。"""
+    doc = _find_by_id(BK_TABLE_NAME_OBJ_DES, rid)
+    if doc is None:
+        raise ModelError("模型不存在: id=%s" % rid, code=404)
+    obj_id = doc.get("bk_obj_id")
+    # 禁止通过 update 停用内置模型
+    if obj_id in BUILTIN_MODEL_IDS and params.get("bk_ispaused") is True:
+        raise ModelError("内置模型不允许停用: %s" % obj_id, code=400)
     return _update_by_id(BK_TABLE_NAME_OBJ_DES, rid, params)
 
 
@@ -256,10 +264,21 @@ def normalize_custom_model_ispre():
 
 
 def update_model_attribute_index(obj_id, property_id, index):
+    """修改属性顺序索引 — 兼容 frontend 传 bk_property_id（字符串）或 id（整数）"""
     result = _coll(BK_TABLE_NAME_OBJ_ATT_DES).update_one(
         {"bk_obj_id": obj_id, "bk_property_id": property_id},
         {"$set": {"bk_property_index": index, "last_time": _now()}},
     )
+    if result.matched_count == 0:
+        # 尝试按 id（整数 pk）匹配：frontend 可能传 id 而非 bk_property_id
+        try:
+            pid = int(property_id)
+            result = _coll(BK_TABLE_NAME_OBJ_ATT_DES).update_one(
+                {"bk_obj_id": obj_id, "id": pid},
+                {"$set": {"bk_property_index": index, "last_time": _now()}},
+            )
+        except (ValueError, TypeError):
+            pass
     if result.matched_count == 0:
         raise ModelError("属性不存在: %s/%s" % (obj_id, property_id), code=404)
     return 1
