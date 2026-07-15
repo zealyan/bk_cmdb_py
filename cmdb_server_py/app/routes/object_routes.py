@@ -3,7 +3,7 @@ from datetime import datetime
 from flask import Blueprint, jsonify, request, g
 from app.models.db import db, get_db_connection, get_mongo_collection, next_sequence
 from app.config import Config
-from app.core.model import ModelError, ensure_model_default_attributes
+from app.core.model import ModelError, ensure_model_default_attributes, get_mainline_neighbors, delete_mainline_object
 
 object_bp = Blueprint('object', __name__)
 
@@ -343,6 +343,173 @@ def get_inst_id_field(obj_id):
     return mapping.get(obj_id, "bk_inst_id")
 
 
+# --------------------------------------------------------------------------- #
+# 业务拓扑实例树：沿动态主线链 + bk_parent_id 遍历（对齐 Go buildTopoInstRst）
+# --------------------------------------------------------------------------- #
+OBJ_NAME_MAP = {
+    "biz": "业务", "bk_biz_set_obj": "业务集", "set": "集群", "module": "模块",
+    "host": "主机", "process": "进程", "plat": "云区域", "cloud_area": "云区域",
+}
+
+
+def get_inst_name_field(obj_id):
+    """返回某对象实例的名称字段（built-in 各异，通用对象统一 bk_inst_name）。"""
+    mapping = {
+        "biz": "bk_biz_name", "bk_biz_set_obj": "bk_biz_set_name", "set": "bk_set_name",
+        "module": "bk_module_name", "host": "bk_host_name", "process": "bk_process_name",
+        "plat": "bk_cloud_name", "cloud_area": "bk_cloud_name",
+    }
+    return mapping.get(obj_id, "bk_inst_name")
+
+
+def get_mainline_chain(supplier='0'):
+    """推导有序主线链 [根..叶]，从 cc_ObjAsst(bk_asst_id=bk_mainline) 动态排出。
+
+    返回示例（无自定义层）: ['biz','set','module','host']；
+    插入 appsys1 后: ['biz','appsys1','set','module','host']。
+    """
+    asst_coll = get_mongo_collection('cc_ObjAsst')
+    mainline_assocs = list(asst_coll.find(
+        {"bk_asst_id": "bk_mainline", "bk_supplier_account": supplier},
+        {"bk_obj_id": 1, "bk_asst_obj_id": 1, "_id": 0}))
+    if not mainline_assocs:
+        return ["biz", "set", "module", "host"]
+    child_to_parent = {}
+    parent_to_child = {}
+    for a in mainline_assocs:
+        c = a.get("bk_obj_id")
+        p = a.get("bk_asst_obj_id")
+        if not c or not p:
+            continue
+        child_to_parent[c] = p
+        parent_to_child[p] = c
+    roots = set(child_to_parent.values()) - set(child_to_parent.keys())
+    if not roots:
+        return ["biz", "set", "module", "host"]
+    current = list(roots)[0]
+    chain = []
+    seen = set()
+    while current and current not in seen:
+        chain.append(current)
+        seen.add(current)
+        current = parent_to_child.get(current)
+    return chain or ["biz", "set", "module", "host"]
+
+
+def _make_topo_node(inst, obj_id, obj_name_map=None, name_field=None, id_field=None):
+    if name_field is None:
+        name_field = get_inst_name_field(obj_id)
+    if id_field is None:
+        id_field = get_inst_id_field(obj_id)
+    obj_name = (obj_name_map or {}).get(obj_id) if obj_name_map else OBJ_NAME_MAP.get(obj_id, obj_id)
+    return {
+        "bk_inst_id": inst.get(id_field),
+        "bk_inst_name": inst.get(name_field, ""),
+        "bk_obj_id": obj_id,
+        "bk_obj_name": obj_name,
+        "default": inst.get("default", inst.get("bk_default", 0)),
+        "child": [],
+    }
+
+
+def build_mainline_inst_tree(conn, supplier, bk_biz_id, with_idle_pool=True):
+    """沿动态主线链 + bk_parent_id 遍历业务实例树，对齐 Go SearchMainlineAssociationInstTopo。
+
+    关键点（对齐 Go buildTopoInstRst 的空闲机池特殊处理）：
+      当遍历到 set 层时，父实例 id 列表须**额外包含 biz id**，使空闲机池
+      （default=1，其 bk_parent_id 指向 biz 而非自定义主线实例）能在 set 层被取到，
+      并因其 parent==biz 而直接挂到业务节点下（而非自定义层）。
+    其余层级严格按 bk_parent_id 一级级下钻；host 无 bk_parent_id 关系，不进实例树
+    （沿用现有「host 仅作计数、不渲染为树节点」的行为）。
+    """
+    chain = get_mainline_chain(supplier)
+    biz = conn.cc_ApplicationBase.find_one(
+        {"bk_biz_id": bk_biz_id, "bk_supplier_account": supplier})
+    if not biz:
+        return []
+
+    # 一次性取回所有主线模型名（自定义层用 cc_ObjDes 名称）
+    obj_name_map = dict(OBJ_NAME_MAP)
+    for d in conn.cc_ObjDes.find(
+            {"bk_supplier_account": supplier},
+            {"bk_obj_id": 1, "bk_obj_name": 1, "_id": 0}):
+        obj_name_map[d.get("bk_obj_id")] = d.get("bk_obj_name", d.get("bk_obj_id"))
+
+    biz_id = biz.get("bk_biz_id")
+    biz_node = _make_topo_node(biz, "biz", obj_name_map=obj_name_map)
+
+    # node_by_id: 全量节点字典（跨级查找父节点用）。
+    # 必须跨级：空闲机池(default=1) 的 bk_parent_id 指向 biz，而 biz 已不在「当前层」字典中，
+    # 若只用当前层 parent_nodes 会丢失它（见 Go buildTopoInstRst 的 idle pool 直接挂 biz 逻辑）。
+    node_by_id = {biz_id: biz_node}
+    parent_nodes = {biz_id: biz_node}   # 仅用于驱动下一层的父实例 id 列表
+    for i in range(1, len(chain)):
+        obj = chain[i]
+        if obj == "host":
+            continue
+        child_coll = conn[get_inst_collection_name(obj)]
+        child_id_field = get_inst_id_field(obj)
+        name_field = get_inst_name_field(obj)
+        parent_ids = list(parent_nodes.keys())
+        # Go 怪异逻辑：set 层额外纳入 biz id，捕获空闲机池(default=1, parent=biz)
+        if obj == "set":
+            parent_ids = parent_ids + [biz_id]
+        filt = {
+            "bk_parent_id": {"$in": parent_ids},
+            "bk_supplier_account": supplier,
+            "bk_data_status": {"$ne": "disabled"},
+        }
+        if not with_idle_pool and obj == "set":
+            filt["default"] = {"$ne": 1}
+        children = list(child_coll.find(filt))
+        # Go SortTopoInst: default(1/2/3) 排前，其余按名称
+        children.sort(key=lambda x: (
+            0 if x.get("default", x.get("bk_default", 0)) in (1, 2, 3) else 1,
+            x.get(name_field, "") or ""))
+        new_parent_nodes = {}
+        for c in children:
+            pid = c.get("bk_parent_id")
+            pnode = node_by_id.get(pid)   # 跨级查找父节点（含 biz）
+            if pnode is None:
+                continue
+            node = _make_topo_node(c, obj, obj_name_map=obj_name_map,
+                                  name_field=name_field, id_field=child_id_field)
+            pnode["child"].append(node)
+            new_parent_nodes[c.get(child_id_field)] = node
+            node_by_id[c.get(child_id_field)] = node
+        parent_nodes = new_parent_nodes
+    return [biz_node]
+
+
+def _attach_host_counts(conn, supplier, biz_node):
+    """后序聚合 host_count：module = 直连主机数；set/biz 累加子树。
+
+    主机-模块关系来自 cc_ModuleHostConfig（host 无 bk_parent_id，故单独 join）。
+    """
+    host_cfg = list(conn.cc_ModuleHostConfig.find(
+        {"bk_supplier_account": supplier, "bk_biz_id": biz_node.get("bk_inst_id")},
+        {"bk_module_id": 1, "_id": 0}))
+    module_host = {}
+    for r in host_cfg:
+        module_host[r.get("bk_module_id")] = module_host.get(r.get("bk_module_id"), 0) + 1
+
+    def walk(node):
+        cnt = 0
+        for child in node.get("child", []):
+            cnt += walk(child)
+            if child.get("bk_obj_id") == "module":
+                child["host_count"] = module_host.get(child.get("bk_inst_id"), 0)
+                child["service_instance_count"] = 0
+                cnt += child["host_count"]
+            elif child.get("bk_obj_id") == "host":
+                cnt += 1
+        node["host_count"] = cnt
+        node.setdefault("service_instance_count", 0)
+        return cnt
+    walk(biz_node)
+    return biz_node
+
+
 def _parse_body():
     """兼容多种请求体格式（JSON / form / raw），返回 dict。"""
     if request.is_json:
@@ -568,6 +735,11 @@ def _query_object_attr_by_obj_ids(obj_ids):
 
         # 避免返回前端会自动添加的 ID 属性
         if prop_id and prop_id not in seen_prop_ids:
+            # 跳过 bk_parent_id：主线模型的结构字段，不应作为用户可见的属性列
+            # （Go createDefaultAttrs 虽会注入 bk_parent_id，但 UI 前端按规范隐含处理，
+            #  不由属性列表公式展示。参见 Go object.go createDefaultAttrs IsSystem=true）。
+            if prop_id == "bk_parent_id":
+                continue
             # 检查是否是会被前端自动添加的 ID 属性
             auto_prop = auto_add_id_props.get(obj_type)
             if auto_prop and prop_id == auto_prop:
@@ -943,6 +1115,10 @@ def create_topo_model_mainline():
                 {"$set": {
                     "bk_asst_obj_id": bk_obj_id,
                     "bk_obj_asst_id": "%s_bk_mainline_%s" % (child_obj_id, bk_obj_id),
+                    # 重链后的关联不再属于「预定义」，须置 ispre=False，
+                    # 否则后续 DeleteMainlineAssociation 的 ispre 守门会误拦（对齐 Go
+                    # createMainlineObjectAssociation 中 IsPre=false 的语义）。
+                    "ispre": False,
                     "last_time": now,
                 }}
             )
@@ -953,6 +1129,117 @@ def create_topo_model_mainline():
 
         obj_doc.pop("_id", None)
         return make_response(data=obj_doc)
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return make_response(result=False, code=500, message=str(e))
+
+
+def _reset_mainline_inst(conn, supplier, target_obj_id, child_obj_id, parent_obj_id, now):
+    """对齐 Go inst.ResetMainlineInstAssociation：删除主线对象实例时，把其直属子级实例
+    重挂到祖父(parent)实例，并删除该主线对象的所有实例（逆 ``_propagate_mainline_inst``）。
+
+    数据关系（与 ``_propagate_mainline_inst`` 一致）：
+      - target 实例的 ``bk_parent_id`` 指向祖父(parent)实例 id；
+      - child 实例的 ``bk_parent_id`` 指向 target 实例 id；
+    重挂：把 child 实例的 ``bk_parent_id`` 改为对应 target 实例的 ``bk_parent_id``（祖父 id），
+    随后删除全部 target 实例。同名冲突（重挂后与祖父已有子级同名）整体中止，
+    对齐 Go ``CCErrTopoDeleteMainLineObjectAndInstNameRepeat``。无实例则提前返回（no-op）。
+    """
+    from collections import Counter
+
+    target_id_field = get_inst_id_field(target_obj_id)
+    child_id_field = get_inst_id_field(child_obj_id)
+
+    target_coll = conn[get_inst_collection_name(target_obj_id)]
+    child_coll = conn[get_inst_collection_name(child_obj_id)]
+
+    target_insts = list(target_coll.find(
+        {"bk_supplier_account": supplier},
+        {target_id_field: 1, "bk_parent_id": 1, "bk_inst_name": 1, "_id": 0}))
+    if not target_insts:
+        return  # 无实例，无需重挂/删除
+
+    # 收集重挂计划，并校验同名冲突（对齐 Go checkInstNameRepeat）
+    reparent_map = {}       # target 实例 id -> (祖父实例 id, [child 实例 id...])
+    planned = []            # [(祖父实例 id, child 实例名)]  将被重挂到祖父的子级
+    reparented_ids = set()  # 所有将被移动的子级实例 id
+    for t in target_insts:
+        t_id = t.get(target_id_field)
+        gp_id = t.get("bk_parent_id")
+        if t_id is None or gp_id is None:
+            continue
+        children = list(child_coll.find(
+            {"bk_parent_id": t_id, "bk_supplier_account": supplier},
+            {child_id_field: 1, "bk_inst_name": 1, "_id": 0}))
+        child_ids = [c.get(child_id_field) for c in children if c.get(child_id_field) is not None]
+        reparent_map[t_id] = (gp_id, child_ids)
+        reparented_ids.update(child_ids)
+        for c in children:
+            planned.append((gp_id, c.get("bk_inst_name")))
+
+    # 祖父实例「原本就已有」的子级名（排除本次将被移动的子级，因其当前 bk_parent_id 可能
+    # 与祖父实例 id 数值相同导致误判；移动子级不算「已存在」，见 appsys/biz 实例 id 重叠场景）
+    gp_ids = {gp for (gp, _) in planned}
+    gp_existing = {gp: set() for gp in gp_ids}
+    for gp in gp_ids:
+        for c in child_coll.find({"bk_parent_id": gp, "bk_supplier_account": supplier},
+                                 {child_id_field: 1, "bk_inst_name": 1, "_id": 0}):
+            if c.get(child_id_field) in reparented_ids:
+                continue
+            gp_existing[gp].add(c.get("bk_inst_name"))
+
+    # 重挂后每个祖父下的「最终子级名」= 原有(排除移动) + 本次重挂；若有重复则冲突
+    gp_final = {gp: list(names) for gp, names in gp_existing.items()}
+    for (gp, name) in planned:
+        gp_final[gp].append(name)
+    for gp, names in gp_final.items():
+        if len(names) != len(set(names)):
+            raise ModelError("删除主线对象 %s 实例时发生同名冲突，已中止" % target_obj_id, code=400)
+
+    # 执行重挂
+    for t_id, (gp_id, child_ids) in reparent_map.items():
+        if child_ids:
+            child_coll.update_many(
+                {child_id_field: {"$in": child_ids}},
+                {"$set": {"bk_parent_id": gp_id, "last_time": now}})
+
+    # 删除 target 实例
+    target_coll.delete_many({"bk_supplier_account": supplier})
+
+
+@object_bp.route('/delete/topomodelmainline/object/<bk_obj_id>', methods=['DELETE'])
+def delete_topo_model_mainline(bk_obj_id):
+    """删除拓扑主线层级 —— 模型详情页「删除」按钮（isMainLineModel 时调用）。
+
+    前端 store: objectMainLineModule/deleteMainlineObject
+    -> DELETE /api/v3/delete/topomodelmainline/object/{bk_obj_id}
+
+    对齐 Go DeleteMainLineObject -> DeleteMainlineAssociation：
+      1) 读取上下游并校验（get_mainline_neighbors）；
+      2) 实例重挂（逆 _propagate_mainline_inst），在元数据删除前完成；
+      3) 元数据删除 + 重链（core.delete_mainline_object）。
+    """
+    try:
+        supplier = (request.args.get('bk_supplier_account') or
+                    (request.get_json(silent=True) or {}).get('bk_supplier_account') or '0')
+        conn = get_db_connection()
+        if conn is None:
+            return make_response(result=False, code=500, message="数据库连接失败")
+
+        # 1) 读取上下游（校验），用于实例重挂
+        nb = get_mainline_neighbors(bk_obj_id)
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        # 2) 实例重挂（逆 _propagate_mainline_inst），在元数据删除前
+        _reset_mainline_inst(conn, supplier, bk_obj_id,
+                             nb["child_obj_id"], nb["parent_obj_id"], now)
+
+        # 3) 元数据删除 + 重链
+        result = delete_mainline_object(bk_obj_id)
+        return make_response(data=result)
+    except ModelError as e:
+        return make_response(result=False, code=getattr(e, 'code', 400), message=str(e))
     except Exception as e:
         import traceback
         traceback.print_exc()
@@ -1512,87 +1799,24 @@ def find_topo_inst_with_statistics(bk_biz_id):
         if not business:
             # 如果没有任何业务，返回空结构
             return make_response(data=[])
-        
-        # 查询主机-模块关系（含空闲机池，用于业务节点总数统计）
-        host_relations = list(conn.cc_ModuleHostConfig.find({"bk_biz_id": business.get("bk_biz_id")}))
 
-        # 查询该业务下的所有集群
-        sets = list(conn.cc_SetBase.find({"bk_biz_id": business.get("bk_biz_id"), "bk_data_status": {"$ne": "disabled"}}))
+        supplier = (request.get_json(silent=True) or {}).get('bk_supplier_account') or '0'
+        biz_id = business.get("bk_biz_id")
 
-        # 查询该业务下的所有模块
-        modules = list(conn.cc_ModuleBase.find({"bk_biz_id": business.get("bk_biz_id"), "bk_data_status": {"$ne": "disabled"}}))
+        # 沿动态主线链构建实例树（with_idle_pool=False：空闲机池不单独成节点，
+        # 对齐 Go withDefault=false；其主机仍计入业务总数）。
+        tree = build_mainline_inst_tree(conn, supplier, biz_id, with_idle_pool=False)
+        if not tree:
+            return make_response(data=[])
+        biz_node = tree[0]
 
-        # 判断是否为空闲机池：bk_default==1 或名为“空闲机池”
-        # 业务拓扑接口须排除空闲机池，否则会与 /topo/internal 接口返回并前置的空闲机池重复。
-        # Go SortTopoInst: default 排前，其余按名称排序
-        sets.sort(key=lambda x: (0 if x.get("default", x.get("bk_default", 0)) in (1, 2, 3) else 1,
-                                   x.get("bk_set_name", "") or ""))
-
-        # 构建集群节点（排除空闲机池，对齐 Go withDefault=false）
-
-        # 构建集群节点（排除空闲机池，对齐 Go withDefault=false）
-        set_nodes = []
-        for s in sets:
-            default_val = s.get("default", s.get("bk_default", 0))
-            if default_val == 1 or s.get("bk_set_name") == "空闲机池":
-                continue
-            set_id = s.get("bk_set_id")
-            # 查找该集群下的所有模块
-            set_modules = [m for m in modules if m.get("bk_set_id") == set_id]
-
-            # Go SortTopoInst: 按 default 排前，其余按名称
-            set_modules.sort(key=lambda x: (0 if x.get("default", x.get("bk_default", 0)) in (1, 2, 3) else 1,
-                                              x.get("bk_module_name", "") or ""))
-
-            # 构建模块节点
-            module_nodes = []
-            set_host_count = 0
-            for m in set_modules:
-                module_id = m.get("bk_module_id")
-                # 统计该模块下的主机数
-                module_hosts = [r for r in host_relations if r.get("bk_module_id") == module_id]
-                host_count = len(module_hosts)
-                set_host_count += host_count
-
-                module_node = {
-                    "bk_obj_id": "module",
-                    "bk_obj_name": "模块",
-                    "bk_inst_id": m.get("bk_module_id"),
-                    "bk_inst_name": m.get("bk_module_name"),
-                    "default": m.get("bk_default", 0),
-                    "child": [],
-                    "host_count": host_count,
-                    "service_instance_count": 0
-                }
-                module_nodes.append(module_node)
-
-            # 构建集群节点
-            set_node = {
-                "bk_obj_id": "set",
-                "bk_obj_name": "集群",
-                "bk_inst_id": s.get("bk_set_id"),
-                "bk_inst_name": s.get("bk_set_name"),
-                "default": s.get("bk_default", 0),
-                "child": module_nodes,
-                "host_count": set_host_count,
-                "service_instance_count": 0
-            }
-            set_nodes.append(set_node)
-
-        # 业务节点主机总数 = 该业务下全部主机（含空闲机池），符合 bk-cmdb 语义
-        total_host_count = len(host_relations)
-
-        # 构建业务拓扑结构
-        biz_node = {
-            "bk_obj_id": "biz",
-            "bk_obj_name": "业务",
-            "bk_inst_id": business.get("bk_biz_id"),
-            "bk_inst_name": business.get("bk_biz_name"),
-            "default": business.get("bk_default", 0),
-            "child": set_nodes,
-            "host_count": total_host_count,
-            "service_instance_count": 0
-        }
+        # 各 module 直连主机数 + set/biz 累加（后序聚合）
+        _attach_host_counts(conn, supplier, biz_node)
+        # 业务节点总数含空闲机池主机（bk-cmdb 语义），覆盖聚合值
+        total_host_count = conn.cc_ModuleHostConfig.count_documents(
+            {"bk_supplier_account": supplier, "bk_biz_id": biz_id})
+        biz_node["host_count"] = total_host_count
+        biz_node.setdefault("service_instance_count", 0)
 
         return make_response(data=[biz_node])
     except Exception as e:
@@ -2218,64 +2442,12 @@ def find_business_topo_inst(bk_biz_id):
         biz_id = business.get("bk_biz_id")
         biz_name = business.get("bk_biz_name", "")
 
-        # 构建拓扑结构（对齐 Go SearchBusinessTopo + SortTopoInst）
-        topo_result = []
-        
-        # 添加业务节点
-        biz_node = {
-            "bk_inst_id": biz_id,
-            "bk_inst_name": biz_name,
-            "bk_obj_id": "biz",
-            "bk_obj_name": "业务",
-            "default": 0,
-            "child": []
-        }
-        
-        # 查询该业务下的所有集群（排除空闲机池 default=1，对齐 Go 的 withDefault=false）
-        sets = list(conn.cc_SetBase.find({
-            "bk_biz_id": biz_id,
-            "bk_data_status": {"$ne": "disabled"},
-            "$or": [{"default": {"$exists": False}}, {"default": {"$ne": 1}}]
-        }))
-        # Go SortTopoInst: default!=0 排前，然后按名称排序
-        sets.sort(key=lambda x: (0 if x.get("default", 0) in (1, 2, 3) else 1,
-                                   x.get("bk_set_name", "") or ""))
-        
-        for s in sets:
-            set_node = {
-                "bk_inst_id": s.get("bk_set_id"),
-                "bk_inst_name": s.get("bk_set_name", ""),
-                "bk_obj_id": "set",
-                "bk_obj_name": "集群",
-                "default": s.get("default", 0),
-                "child": []
-            }
-            
-            # 查询该集群下的所有模块
-            modules = list(conn.cc_ModuleBase.find({
-                "bk_set_id": s.get("bk_set_id"),
-                "bk_biz_id": biz_id,
-                "bk_data_status": {"$ne": "disabled"}
-            }))
-            # Go SortTopoInst: default 排前，其余按名称
-            modules.sort(key=lambda x: (0 if x.get("default", 0) in (1, 2, 3) else 1,
-                                         x.get("bk_module_name", "") or ""))
-            
-            for m in modules:
-                module_node = {
-                    "bk_inst_id": m.get("bk_module_id"),
-                    "bk_inst_name": m.get("bk_module_name", ""),
-                    "bk_obj_id": "module",
-                    "bk_obj_name": "模块",
-                    "default": m.get("default", 0),
-                    "child": []
-                }
-                set_node["child"].append(module_node)
-            
-            biz_node["child"].append(set_node)
-        
-        topo_result.append(biz_node)
-        
+        # 沿动态主线链 + bk_parent_id 构建业务拓扑实例树（对齐 Go SearchMainlineAssociationInstTopo）。
+        # 插入自定义主线层（如 appsys1）后，该层会作为新节点出现在业务拓扑中，
+        # 存量 set 实例经 _propagate_mainline_inst 已 reparent 到新层实例下。
+        supplier = (request.get_json(silent=True) or {}).get('bk_supplier_account') or '0'
+        topo_result = build_mainline_inst_tree(conn, supplier, biz_id, with_idle_pool=True)
+
         return make_response(data=topo_result)
     except Exception as e:
         import traceback

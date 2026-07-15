@@ -512,3 +512,314 @@ mongorestore --uri="mongodb://cc:cc@127.0.0.1:27017/cmdb?replicaSet=rs0&authSour
   --db cmdb --drop <备份目录>/cmdb_<时间戳>/cmdb
 ```
 
+
+---
+
+## 15. Python migrate seed 对齐 Go 官方种子（v3.10.50）
+
+**背景**：用户反馈「migrate seed 数据不太对」。根因是 Python migrate 的模型 ID 命名与 Go 官方种子不一致，而编译版 Vue UI 发送的是 Go 的 ID，导致字段错位。
+
+### 15.1 Go 官方方案执行（基线）
+
+```bash
+cd prod_bin/deploy
+bash init_cmdb_seed.sh run --clear     # 清空并走 cmdb_adminserver 内置 migrate
+```
+
+结果：`cmdb` 库产出 **78 个集合**的权威基线（`cc_ObjAttDes=145`、`cc_ApplicationBase=2` 等）。
+
+### 15.2 差异根因（Python 旧实现 vs Go）
+
+| 维度 | Python 旧实现（错误） | Go 官方（正确） |
+|------|----------------------|----------------|
+| 网络对象 ID | `switch / router / load_balance / firewall` | `bk_switch / bk_router / bk_load_balance / bk_firewall` |
+| 业务角色字段 | `bk_maintainers / bk_productpm / bk_tester / bk_operator` | `bk_biz_maintainer / bk_biz_productor / bk_biz_tester / operator` |
+| 属性分组 ID | `base / port / gsekit_base` | `default / proc_port / gsekit_baseinfo` |
+| 分类 | 缺 `bk_uncategorized` | 含 `bk_uncategorized`（5 个） |
+| 对象数 | 10（无 `bk_biz_set_obj`） | 11 |
+| 主机关联 | `host→plat (bk_cloud_id)` | `bk_switch→host (connect)` |
+| 属性总数 | 119 | 145 |
+
+> 完整差异见 `diff_go_vs_py.md`；Go 权威数据见 `go_attr_full.json` / `go_model_ref.json` / `go_default_data.json`。
+
+### 15.3 迭代内容（一次到位）
+
+源文件改造（均在 `cmdb_server_py/migrate/`）：
+
+| 文件 | 改造 |
+|------|------|
+| `data/attributes.py` | `ATTRIBUTES` 替换为 **145** 条，保留 Go 原始 `id`（1..159）供 `cc_ObjectUnique.key_id` 引用；`option` 按 Go 原样（enum 为 JSON 字符串） |
+| `data/groups.py` | `GROUPS` 替换为 **19** 条，分组 ID 对齐 Go（`default/role/proc_port/...`），`isdefault=None` |
+| `base_migrate.py` | 分类补 `bk_uncategorized`（5）；对象改 `bk_` 前缀 + 加 `bk_biz_set_obj`（11）；`cc_System` 对齐 Go 三文档（版本/hostcrossbiz/UI 配置） |
+| `data/associations.py` | `ASSOCIATIONS` 替换为 Go **4** 条（`bk_switch→host connect`，移除旧 `host→plat`） |
+| `data/default_data.py`（**新增**） | 运行级种子：`cc_ObjectUnique`(14)、`cc_BizSetBase`(1)、`cc_ApplicationBase`(资源池+蓝鲸)+`cc_SetBase`(2)+`cc_ModuleBase`(4)、`cc_idgenerator`(15) |
+| `cli.py` | `cmd_all` 在末尾调用 `run_default_data_migrate(db)` |
+
+**ID 生成器关键点**：Flask 的 `next_sequence` 依赖 `cc_idgenerator`（`_id`=集合名、`SequenceID` 自增）。`IDGeneratorMigrate` 按各集合**实际最大 id** 动态计算 `SequenceID`（如 `cc_ObjAttDes=159`、`cc_ServiceCategory=42`），避免新建对象与已种子 id 冲突。服务分类采用非连续 id（最大 42），故**不能**直接套用 Go 的连续值 20。
+
+### 15.4 验证（Python → 对齐 Go）
+
+清空临时库 `cmdb_pycmp` 后执行 `python3.11 -m migrate.cli --all`，逐项对比 `cmdb`（Go）：
+
+| 集合 | Go | Python | 结果 |
+|------|----|--------|------|
+| cc_ObjClassification | 5 | 5 | ✅ |
+| cc_ObjDes | 11 | 11 | ✅ |
+| cc_ObjAttDes | 145 | 145 | ✅ 关键字段 0 差异 |
+| cc_PropertyGroup | 19 | 19 | ✅ 关键字段 0 差异 |
+| cc_ObjAsst | 4 | 4 | ✅ |
+| cc_System | 3 | 3 | ✅ |
+| cc_ObjectUnique | 14 | 14 | ✅ key_id 全部可解析到 cc_ObjAttDes.id |
+| cc_BizSetBase | 1 | 1 | ✅ |
+| cc_ApplicationBase | 2 | 2 | ✅ 资源池 + 蓝鲸 |
+| cc_SetBase / cc_ModuleBase | 2 / 4 | 2 / 4 | ✅ |
+| cc_idgenerator | 15 | 15 | ✅ 所有 SequenceID ≥ 已用最大 id（无冲突） |
+
+12 个集合计数全部一致、无单方缺失；`biz` 属性 ID 集合与 Go 完全相同。
+
+### 15.5 重新播种运行库（可选）
+
+若需让运行中的 `cmdb` 改用 Python migrate 作为种子源（与 Go 数据等价）：
+
+```bash
+cd cmdb_server_py
+export MONGO_URI="mongodb://cc:cc@127.0.0.1:27017/?authSource=cmdb"
+export MONGO_DB="cmdb"
+python3.11 -m migrate.cli --all      # 幂等 upsert，模型集合对齐 Go
+# 业务/主机实例数据由 seed_extra.py 或 API 导入补充
+python3.11 seed_extra.py              # 补充 mock 业务 + 主机（如需）
+```
+
+> 注意：Go 已种子的 `cmdb` 本身即正确数据；本迭代确保「改用 Python migrate 重新播种」时产出同样正确的数据。清空重建前请先备份（`prod_bin/backups/`）。
+
+---
+
+## 16. 补充 Python migrate mock 数据（seed_extra.py）
+
+> 目的：在 Go 已种子的运行库 `cmdb` 之上，补充 1 个 mock 业务 + 12 台主机，供前端拓扑/资源/主机视图演示读取。
+> 脚本：`cmdb_server_py/seed_extra.py`（幂等；默认连接 `mongodb://cc:cc@127.0.0.1:27017/cmdb?authSource=cmdb`，DB=`cmdb`）。
+
+### 16.1 前置依赖（运行前已具备）
+
+| 前置集合 | 运行前计数 | 说明 |
+|---|---|---|
+| `cc_idgenerator` | 16 | 提供各集合 ID 原子 `$inc` 序列；缺失会报错 |
+| `cc_ApplicationBase` | 2 | Go 种子（资源池 id=1 + 蓝鲸 id=2） |
+| `cc_SetBase` | 2 | Go 种子 |
+| `cc_ModuleBase` | 4 | Go 种子 |
+| `cc_HostBase` | 0 | 目标表，本次写入 12 条 |
+| `mock-biz-001` 是否已存在 | 否 | 走「全新创建」分支 |
+
+### 16.2 执行命令
+
+```bash
+cd /workspace/bk_cmdb_py/cmdb_server_py
+python3.11 seed_extra.py
+```
+
+可选环境变量覆盖：`SEED_BIZ_NAME` / `SEED_HOST_COUNT` / `SEED_IP_PREFIX` / `SEED_SET_NAME` / `SEED_MODULE_NAME`。
+
+### 16.3 执行结果（2026-07-14）
+
+| 对象 | 关键 ID | 名称 | 归属 |
+|---|---|---|---|
+| 业务 | `bk_biz_id=3` | `mock-biz-001` | `bk_supplier_account=0` |
+| 集群 | `bk_set_id=3` | `mock-set-001` | biz=3 |
+| 模块 | `bk_module_id=7` | `mock-module-001` | set=3 |
+| 主机 | `bk_host_id=1..12` | IP `10.10.10.101..112` | `bk_cloud_id=0` |
+
+### 16.4 写入后计数与一致性校验
+
+| 集合 | 运行前 | 运行后 | 校验 |
+|---|---|---|---|
+| `cc_ApplicationBase` | 2 | 3 | ✓ +1 mock 业务 |
+| `cc_SetBase` | 2 | 3 | ✓ +1 集群 |
+| `cc_ModuleBase` | 4 | 5 | ✓ +1 模块 |
+| `cc_HostBase` | 0 | 12 | ✓ 12 台主机，ID 1..12 唯一无碰撞 |
+| `cc_ModuleHostConfig` | 0 | 12 | ✓ 主机↔模块关系，均指向 module=7/set=3/biz=3 |
+| `cc_ObjAttDes(is_required=True)` | — | 12 | ✓ `fix_required_fields` 标记名称字段 |
+
+- `cc_idgenerator` 关键序列：`cc_ApplicationBase=3`、`cc_SetBase=3`、`cc_ModuleBase=7`、`cc_HostBase=12`，均 ≥ 已用最大值，后续新建对象不碰撞。
+- 主机文档本体 `bk_biz_id/set_id/module_id` 为 `None`，归属关系由 `cc_ModuleHostConfig` 承载（bk-cmdb 标准范式：通过关系表推导拓扑层级）。
+- Python 后端现已可通过 `/search/instances/object/host` 等接口读取这 12 台主机。
+
+---
+
+## 17. 主线节点删除接口实现（`DELETE /delete/topomodelmainline/object/{bk_obj_id}`）
+
+### 17.1 背景与根因
+
+模型详情页顶部「删除」按钮在 `isMainLineModel` 为真时走**专用删除通道**（前端 `objectMainLineModule/deleteMainlineObject`
+→ `DELETE /api/v3/delete/topomodelmainline/object/{bk_obj_id}`），而模型详情「模型关联」tab 里的删除对 `bk_mainline`
+行是**禁用**的（见 § 对话：`relation.vue` 的 `isEditable` 仅放行非 `bk_mainline` 关联，后端 `DeleteAssociationWithPreCheck`
+亦以 `1101082` 拒收 `bk_mainline`）。
+
+此前 Python 后端**只实现了** `POST /create/topomodelmainline` 与 `POST /find/topomodelmainline`，**缺 DELETE**，
+导致前端点击「删除」命中 404 → 报错「api可能没实现」。本 § 补全该接口，逻辑严格对齐 Go `DeleteMainLineObject →
+DeleteMainlineAssociation`。
+
+### 17.2 Go 原逻辑对照（`DeleteMainlineAssociation`）
+
+| 步骤 | Go 行为 | 守门条件 |
+|---|---|---|
+| 0 守门 | `IsInnerModel` 拒绝内置模型；`IsPre` 拒绝预定义主线关联；要求 child、parent 关联均存在 | 内置模型 / `ispre` / 缺上下游 → 报错 |
+| 1 实例 | `ResetMainlineInstAssociation`：把 target 的直属子实例 reparent 到祖父(parent) 实例，再删 target 全部实例；同名冲突整体中止 | `CCErrTopoDeleteMainLineObjectAndInstNameRepeat` |
+| 2 重链 | `createMainlineObjectAssociation(child, parent)`：child 挂回 parent（如 `set_bk_mainline_biz`） | 已存在则跳过 |
+| 3 删关联 | `DeleteModelAssociation`：删除 target 作为子/父的全部 `bk_mainline` 关联 | — |
+| 4 删模型 | `obj.DeleteObject`：删除 cc_ObjDes 及级联元数据 | — |
+
+> 关键顺序：**先实例重挂/删除（步骤1），再元数据删除+重链（步骤2-4）**。Python 实现保持同一顺序。
+
+### 17.3 Python 实现要点
+
+**路由层**（`app/routes/object_routes.py`，`@object_bp.route('/delete/topomodelmainline/object/<bk_obj_id>', methods=['DELETE'])`）
+
+```python
+def delete_topo_model_mainline(bk_obj_id):
+    supplier = (request.args.get('bk_supplier_account') or
+                (request.get_json(silent=True) or {}).get('bk_supplier_account') or '0')
+    conn = get_db_connection()
+    if conn is None:
+        return make_response(result=False, code=500, message="数据库连接失败")
+    nb = get_mainline_neighbors(bk_obj_id)          # 1) 校验 + 取上下游
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    _reset_mainline_inst(conn, supplier, bk_obj_id, # 2) 实例重挂（逆 _propagate_mainline_inst）
+                         nb["child_obj_id"], nb["parent_obj_id"], now)
+    result = delete_mainline_object(bk_obj_id)      # 3) 元数据删除 + 重链
+    return make_response(data=result)
+```
+
+**`_reset_mainline_inst`（实例级，逆 `_propagate_mainline_inst`）**
+
+- 收集 target 实例 → 其 `bk_parent_id`（祖父 id）与直属 child 实例（按 `bk_parent_id == target_inst_id` 查）。
+- 同名冲突校验：计算每个祖父重挂后的「最终子级名集合」= 原已有（**排除本次将被移动的子级**）+ 本次重挂；集合有重复即抛
+  `ModelError("删除主线对象 %s 实例时发生同名冲突，已中止", code=400)`。
+  - ※ 排除移动子级的必要性：`appsys` 实例 id（1,2）与 `biz` 实例 id（1,2,3）**数值重叠**，若不排除，set 实例
+    `bk_parent_id` 同时等于 appsys id 与 biz id，会被误判为「已存在同名」→ 假阳性冲突（见 17.5 修复）。
+- 执行：批量把 child 实例 `bk_parent_id` 改挂祖父 id → 删除 target 实例表全量。无实例则 no-op 提前返回。
+
+**`core.delete_mainline_object`（元数据级）**
+
+1. 重链 `child → parent`（如 `set_bk_mainline_biz`），已存在则跳过（`create_object_association`，`ispre=False`）；
+2. `delete_many` 删除 target 作为子/父的全部 `bk_mainline` 关联；
+3. 级联清理 target 为源端的其余关联 / 属性 `cc_ObjAttDes` / 唯一规则 `cc_ObjectUnique` / 属性分组 `cc_PropertyGroup`；
+4. `_delete_by_id` 删除 `cc_ObjDes` 模型本体。
+
+**`core.get_mainline_neighbors`（守门 + 推导上下游，不写数据）**
+
+- `bk_obj_id ∈ BUILTIN_MODEL_IDS` → 400「内置主线模型不允许删除」；
+- 模型不存在 → 404；
+- 查 `bk_asst_id=bk_mainline` 且（`bk_obj_id==target` 或 `bk_asst_obj_id==target`）的关联，无则 400「不是主线模型」；
+- 任一匹配关联 `ispre=True` → 400「预定义主线关联禁止删除」；
+- 推导出 `child_obj_id`（target 为父时的子级）与 `parent_obj_id`（target 为子时的父级），缺一则 400。
+
+导入已在 `app/routes/object_routes.py:6` 补齐：
+`from app.core.model import ModelError, ensure_model_default_attributes, get_mainline_neighbors, delete_mainline_object`。
+
+### 17.4 伴随修复：create-relink 的 `ispre` 数据 bug
+
+此前 `POST /create/topomodelmainline` 第 3 步重链时，只更新了 `bk_asst_obj_id` / `bk_obj_asst_id`，
+**漏置 `ispre=False`**，导致 `set_bk_mainline_appsys` 仍带 `ispre=True`。Go 在重链时显式 `IsPre=false`，
+而 Python 未对齐，会让本 § 的 `ispre` 守门误拦删除。
+
+修复（`create_topo_model_mainline` 步骤 3 的 `$set`）：
+```python
+obj_asst_coll.update_one(
+    {"_id": existing_child_asst["_id"]},
+    {"$set": {
+        "bk_asst_obj_id": bk_obj_id,
+        "bk_obj_asst_id": "%s_bk_mainline_%s" % (child_obj_id, bk_obj_id),
+        "ispre": False,           # 重链后非预定义
+        "last_time": now,
+    }}
+)
+```
+存量脏数据归一化：`cc_ObjAsst.update_many({"bk_obj_asst_id":"set_bk_mainline_appsys"}, {"$set":{"ispre":False}})`（1 条）。
+校验：`module_bk_mainline_set`、`host_bk_mainline_module` 仍正确保留 `ispre=True`（真实预定义内置关联，不应被删）。
+
+### 17.5 验证结果（删除 `appsys`，链路 `biz → appsys → set → module → host`）
+
+删除前备份已存于 `/workspace/bk_cmdb_py/backup_appsys_delete/`（cc_ObjAsst / cc_ObjDes /
+cc_ObjectBase_0_pub_appsys / cc_SetBase / cc_ApplicationBase 的 JSON dump），可回滚。
+
+| 校验项 | 删除前 | 删除后 | 结论 |
+|---|---|---|---|
+| 主线关联 | `appsys_bk_mainline_biz`、`set_bk_mainline_appsys`、`module_bk_mainline_set`、`host_bk_mainline_module` | `set_bk_mainline_biz`(ispre=False)、`module_bk_mainline_set`、`host_bk_mainline_module` | ✓ appsys 关联全清，链还原为 `biz→set→module→host` |
+| `cc_ObjDes`(appsys) | 存在 | None | ✓ 模型本体删除 |
+| `cc_ObjAttDes`(appsys) | N | 0 条 | ✓ 属性级联清理 |
+| `cc_ObjectBase_0_pub_appsys` | N | 0 条 | ✓ 实例表清空 |
+| set 实例 `bk_parent_id` | 指向 appsys 实例(1/2/3) | set1→1、set2→2、set3→3（biz 实例） | ✓ 子级成功 reparent 到祖父 |
+| `POST /find/topomodelmainline` | 含 appsys 5 节点 | 干净 4 节点 `biz→set→module→host` | ✓ |
+
+**守门测试（均按预期拒绝；注意本仓库 `make_response` 恒返回 HTTP 200，错误码在 body 的 `code`/`bk_error_code` 字段，前端据此判定成败）：**
+
+| 输入 | body `code` | 消息 |
+|---|---|---|
+| 内置模型 `set` | 400 | 内置主线模型不允许删除 |
+| 不存在 `nope` | 404 | 模型不存在 |
+| 非主线 `bk_switch` | 400 | 模型不是主线模型，无主线关联可删除 |
+
+### 17.6 端到端使用
+
+- 前端：模型详情页（如 `appsys`）→ 顶部「删除」→ 走 `isMainLineModel` 专用通道 → 调用本接口。
+- 后端需重启 `app.py:3000` 使新路由生效（增量代码已写入，未重启则旧进程无此路由）。
+- 关联接口：`POST /create/topomodelmainline`（新建层级）、`POST /find/topomodelmainline`（查询链路）、
+  本 `DELETE /delete/topomodelmainline/object/{bk_obj_id}`（删除层级）三者构成主线节点 CRUD 闭环。
+
+---
+
+## 18. 业务拓扑读取须遍历动态主线链（修复「新增主线层后业务树无变化」）
+
+### 18.1 现象
+
+模型-编辑拓扑 新增 `appsys1_bk_mainline_biz` 后，业务拓扑（`业务拓扑` 页）**无任何层级变化**：
+- 存量 set 经 `_propagate_mainline_inst` 已 reparent 到 appsys1 实例下（写入侧正确）；
+- 但业务拓扑读取接口**不渲染** appsys1 层级，sets 仍显示直接挂在业务下。
+
+### 18.2 根因（READ 侧写死主线链，与 Go 相反）
+
+`object_routes.py` 的 `find_business_topo_inst`(`/find/topoinst/biz/<id>`) 与
+`find_topo_inst_with_statistics`(`/find/topoinst_with_statistics/biz/<id>`) 把主线链**硬编码为
+biz→set→module**，按 `bk_biz_id`/`bk_set_id` 直接查、完全忽略 `bk_parent_id`，**从不查询自定义主线层**
+（如 `cc_ObjectBase_0_pub_appsys1`）。故新插入的 appsys1 层级在读取端不可见 → 「无数据变化」。
+
+> 对照 Go：`SearchMainlineAssociationInstTopo` + `buildTopoInstRst` 是**沿动态主线链 + `bk_parent_id`**
+> 逐级下钻的（链由 `cc_ObjAsst` 的 `bk_mainline` 关联实时推导）。写入侧 `_propagate_mainline_inst`
+> 已对齐 Go（`getMainlineChildInst` 在 `childObjID==set` 时排除 `default=1` 空闲机池；`buildTopoInstRst`
+> 第 374 行把空闲机池直接挂到业务节点下）。**所以写入侧本就正确，问题纯在读取侧。**
+
+> 旁注：`/update/objecttopo/scope_type/global/scope_id/0`（模型-编辑拓扑的「自动保存」接口）当前是**空桩**
+> （`return make_response()`），不落库。因此主线关联须由 `POST /create/topomodelmainline`（`_propagate_mainline_inst`
+> 在此触发，创建 appsys1 实例并 reparent 存量 set）创建，不能依赖编辑拓扑页的自动保存。
+
+### 18.3 修复（新增动态遍历，对齐 Go buildTopoInstRst）
+
+`object_routes.py` 新增共享辅助函数：
+
+| 函数 | 职责 |
+|---|---|
+| `get_mainline_chain(supplier)` | 从 `cc_ObjAsst(bk_mainline)` 推导有序链，如 `[biz, appsys1, set, module, host]`（无自定义层时回退默认 4 级） |
+| `build_mainline_inst_tree(conn, supplier, bk_biz_id, with_idle_pool)` | 沿链 + `bk_parent_id` 逐级构建实例树；**Go 怪异逻辑复刻**：遍历到 set 层时，父实例 id 列表**额外纳入 biz id**，使空闲机池（`default=1`、其 `bk_parent_id` 指向 biz）在 set 层被取到并因 parent==biz 直接挂业务下 |
+| `_attach_host_counts(conn, supplier, biz_node)` | 后序聚合 `host_count`：module = 直连主机数（来自 `cc_ModuleHostConfig`），set/biz 累加 |
+| `get_inst_name_field(obj_id)` | 各对象实例名/ID 字段映射（built-in 各异，通用对象用 `bk_inst_name`/`bk_inst_id`） |
+
+两个端点重构为调用 `build_mainline_inst_tree`：
+- `find/topoinst/biz/<id>` → `with_idle_pool=True`（空闲机池作为业务下节点渲染）；
+- `find/topoinst_with_statistics/biz/<id>` → `with_idle_pool=False`（空闲机池不单独成节点，但其主机计入业务总数 `total_host_count`，与原有语义一致）。
+
+遍历用**全量 `node_by_id` 字典跨级查找父节点**（不能只用当前层 `parent_nodes`，否则空闲机池 parent=biz 在第 set 层查到后找不到 biz 节点而丢失——初版即此 bug）。
+
+### 18.4 验证结果
+
+重启 `app.py:3000` 后，业务拓扑正确渲染：
+
+| 业务 | 渲染结果 |
+|---|---|
+| 资源池(biz1，仅空闲机池) | `资源池` → [`应用系统1`(appsys1, 空节点), `空闲机池`(set)→`空闲机`(module)] |
+| 蓝鲸(biz2，仅空闲机池) | `蓝鲸` → [`应用系统1`(appsys1, 空节点), `空闲机池`(set)→待回收/故障机/空闲机] |
+| mock-biz-001(biz3) | `mock-biz-001` → `应用系统1`(inst=8) → [`DD`(set)→`对对对`, `mock-set-001`(set)→`mock-module-001`] |
+
+即：自定义主线层 appsys1 作为新层级出现，存量非默认 set 经 reparent 挂在 appsys1 下，空闲机池仍直接挂在业务下（与 Go 一致）。`_with_statistics` 版 host_count 沿 appsys1 正确向上聚合（biz3=12）。
+
+回归测试：`tests/test_mainline_delete.py` 新增 `test_business_topo_includes_custom_mainline_level`（断言 appsys1 出现且下挂 set）、
+`test_business_topo_idle_pool_under_biz`（断言空闲机池直接挂业务）。全量 `pytest tests/test_mainline_delete.py` → 6 passed。

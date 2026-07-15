@@ -215,9 +215,11 @@ def ensure_model_default_attributes(bk_obj_id, supplier=DEFAULT_SUPPLIER, is_mai
 
     # 实例名：所有模型必注入（自定义模型 GetInstNameField 返回 bk_inst_name）
     _ensure("bk_inst_name", "实例名", "singlechar", True, True, True, False)
-    # 主线模型额外注入父级 ID
-    if is_mainline:
-        _ensure("bk_parent_id", "bk_parent_id", "int", True, True, True, True)
+    # 主线模型注入 bk_parent_id 只对内建模型（biz/set/module）有效：内建模型由 Go 的
+    # createDefaultAttrs 注入（IsSystem=true），但本条 ensure_model_default_attributes
+    # 仅对自定义模型生效（caller 已过滤 BUILTIN_MODEL_IDS），故不再重复注入 bk_parent_id。
+    # 自定义主线模型不应有 bk_parent_id 作为用户可见属性列（由属性列表端点的 bk_parent_id
+    # 过滤逻辑保障，见 object_routes.py _query_object_attr_by_obj_ids）。
 
     # 确保「default」属性分组存在（否则 bk_inst_name 的 bk_property_group="default"
     # 指向不存在的分组，前端按分组渲染字段时将跳过该属性，模型详情页无任何字段可显示）。
@@ -292,6 +294,105 @@ def delete_model(rid):
     _coll(BK_TABLE_NAME_PROPERTY_GROUP).delete_many({"bk_obj_id": obj_id, "bk_supplier_account": supplier})
     _delete_by_id(BK_TABLE_NAME_OBJ_DES, rid)
     return 1
+
+
+# --------------------------------------------------------------------------- #
+# Mainline（拓扑主线节点删除）
+# --------------------------------------------------------------------------- #
+def get_mainline_neighbors(bk_obj_id):
+    """读取并校验主线节点的上下游（不修改数据）。
+
+    对齐 Go ``DeleteMainlineAssociation`` 的守门与上下游推导：
+      - 内置主线模型（biz/set/module/host/...）禁止删除；
+      - 模型必须存在；
+      - 必须存在 ``bk_asst_id=bk_mainline`` 且（``bk_obj_id==target`` 或
+        ``bk_asst_obj_id==target``）的关联；
+      - 预定义(ispre)主线关联禁止删除；
+      - 需同时推导出 childObjID（target 作为父时的子级）与 parentObjID（target 作为子时的父级）。
+
+    返回 ``{"child_obj_id", "parent_obj_id", "obj_id"}``；任一守门不通过抛 ``ModelError``。
+    """
+    supplier = DEFAULT_SUPPLIER
+    if bk_obj_id in BUILTIN_MODEL_IDS:
+        raise ModelError("内置主线模型不允许删除: %s" % bk_obj_id, code=400)
+    obj_doc = _coll(BK_TABLE_NAME_OBJ_DES).find_one(
+        {"bk_obj_id": bk_obj_id, "bk_supplier_account": supplier})
+    if obj_doc is None:
+        raise ModelError("模型不存在: bk_obj_id=%s" % bk_obj_id, code=404)
+    asst_coll = _coll(BK_TABLE_NAME_OBJ_ASST)
+    matched = list(asst_coll.find({
+        "bk_asst_id": "bk_mainline",
+        "bk_supplier_account": supplier,
+        "$or": [{"bk_obj_id": bk_obj_id}, {"bk_asst_obj_id": bk_obj_id}],
+    }))
+    if not matched:
+        raise ModelError("模型 %s 不是主线模型，无主线关联可删除" % bk_obj_id, code=400)
+    child_obj_id = None
+    parent_obj_id = None
+    for a in matched:
+        if a.get("ispre"):
+            raise ModelError("预定义主线关联禁止删除: %s" % a.get("bk_obj_asst_id"), code=400)
+        if a.get("bk_asst_obj_id") == bk_obj_id:
+            child_obj_id = a.get("bk_obj_id")          # target 作为父级 -> 子级
+        if a.get("bk_obj_id") == bk_obj_id:
+            parent_obj_id = a.get("bk_asst_obj_id")    # target 作为子级 -> 父级
+    if not child_obj_id or not parent_obj_id:
+        raise ModelError("主线模型 %s 缺少父级或子级，无法安全删除" % bk_obj_id, code=400)
+    return {"child_obj_id": child_obj_id, "parent_obj_id": parent_obj_id, "obj_id": obj_doc.get("id")}
+
+
+def delete_mainline_object(bk_obj_id):
+    """删除一个主线模型节点：重链上下游 + 删除其主线关联与模型元数据。
+
+    对齐 Go ``DeleteMainlineAssociation``（不含实例级处理，实例重挂/删除由路由层
+    ``_reset_mainline_inst`` 在调用本函数前完成，顺序与 Go 一致）。
+
+    流程：
+      1) 重链 child -> parent（如 ``set_bk_mainline_biz``），已存在则跳过；
+      2) 删除所有命中（target 为子或父）的主线关联（``appsys_bk_mainline_biz`` 与
+         ``set_bk_mainline_appsys``）；
+      3) 级联清理其余以 target 为源端的关联、属性、唯一规则、属性分组；
+      4) 删除 cc_ObjDes 模型本体。
+    """
+    conn = get_db_connection()
+    if conn is None:
+        raise ModelError("数据库连接失败", code=500)
+    supplier = DEFAULT_SUPPLIER
+    nb = get_mainline_neighbors(bk_obj_id)   # 守门 + 取上下游
+    child_obj_id = nb["child_obj_id"]
+    parent_obj_id = nb["parent_obj_id"]
+    obj_id = nb["obj_id"]
+    asst_coll = _coll(BK_TABLE_NAME_OBJ_ASST)
+
+    # 1) 重链 child -> parent（如 set_bk_mainline_biz）
+    relink_id = "%s_bk_mainline_%s" % (child_obj_id, parent_obj_id)
+    if not asst_coll.find_one({"bk_obj_asst_id": relink_id, "bk_supplier_account": supplier}):
+        create_object_association({
+            "bk_obj_id": child_obj_id,
+            "bk_asst_obj_id": parent_obj_id,
+            "bk_asst_id": "bk_mainline",
+            "bk_obj_asst_id": relink_id,
+            "mapping": "1:1",
+            "on_delete": "none",
+            "ispre": False,
+            "creator": "admin",
+            "bk_supplier_account": supplier,
+        })
+
+    # 2) 删除所有命中（target 作为子或父）的主线关联
+    asst_coll.delete_many({
+        "bk_asst_id": "bk_mainline",
+        "bk_supplier_account": supplier,
+        "$or": [{"bk_obj_id": bk_obj_id}, {"bk_asst_obj_id": bk_obj_id}],
+    })
+
+    # 3) 级联清理其余以 target 为源端的元数据
+    _coll(BK_TABLE_NAME_OBJ_ASST).delete_many({"bk_obj_id": bk_obj_id, "bk_supplier_account": supplier})
+    _coll(BK_TABLE_NAME_OBJ_ATT_DES).delete_many({"bk_obj_id": bk_obj_id, "bk_supplier_account": supplier})
+    _coll(BK_TABLE_NAME_OBJ_UNIQUE).delete_many({"bk_obj_id": bk_obj_id, "bk_supplier_account": supplier})
+    _coll(BK_TABLE_NAME_PROPERTY_GROUP).delete_many({"bk_obj_id": bk_obj_id, "bk_supplier_account": supplier})
+    _delete_by_id(BK_TABLE_NAME_OBJ_DES, obj_id)
+    return {"bk_obj_id": bk_obj_id, "child_obj_id": child_obj_id, "parent_obj_id": parent_obj_id}
 
 
 def search_model(params):
