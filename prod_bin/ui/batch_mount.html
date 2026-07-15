@@ -1,0 +1,239 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>批量挂载新节点 · CMDB 主线拓扑</title>
+<style>
+  :root{
+    --bg:#f5f7fa; --card:#fff; --line:#e3e8ef; --pri:#3a84ff; --pri-d:#2c6fe0;
+    --ok:#2dcb89; --err:#ff5656; --txt:#313238; --sub:#979ba5;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;
+       background:var(--bg);color:var(--txt);font-size:14px;line-height:1.6}
+  .wrap{max-width:880px;margin:0 auto;padding:24px 16px 60px}
+  h1{font-size:20px;margin:0 0 4px}
+  .desc{color:var(--sub);margin:0 0 18px}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:18px 20px;margin-bottom:16px}
+  .chain{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-top:6px}
+  .chip{background:#eef4ff;color:var(--pri-d);border:1px solid #d4e3ff;padding:3px 10px;border-radius:14px;font-size:13px}
+  .arrow{color:var(--sub)}
+  label{display:block;font-weight:600;margin:14px 0 6px}
+  select,input,textarea{width:100%;border:1px solid var(--line);border-radius:6px;padding:8px 10px;font-size:14px;
+        font-family:inherit;background:#fff;color:var(--txt)}
+  textarea{min-height:140px;resize:vertical;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+  .row{display:flex;gap:14px}
+  .row>div{flex:1}
+  .hint{color:var(--sub);font-size:12px;margin-top:4px}
+  button{background:var(--pri);color:#fff;border:0;border-radius:6px;padding:9px 18px;font-size:14px;cursor:pointer;font-weight:600}
+  button:hover{background:var(--pri-d)}
+  button:disabled{opacity:.55;cursor:not-allowed}
+  .ghost{background:#fff;color:var(--pri-d);border:1px solid #d4e3ff;margin-left:10px}
+  table{width:100%;border-collapse:collapse;margin-top:10px;font-size:13px}
+  th,td{border:1px solid var(--line);padding:7px 10px;text-align:left}
+  th{background:#fafbfd;color:var(--sub);font-weight:600}
+  .s-ok{color:var(--ok);font-weight:600}
+  .s-err{color:var(--err);font-weight:600}
+  .badge{display:inline-block;padding:2px 8px;border-radius:10px;font-size:12px;font-weight:600}
+  .badge.ok{background:#e8faf1;color:var(--ok)}
+  .badge.err{background:#ffeeee;color:var(--err)}
+  #status{margin-top:10px;font-size:13px;color:var(--sub)}
+  code{background:#f0f2f5;padding:1px 5px;border-radius:4px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>批量挂载新节点</h1>
+  <p class="desc">为<b>自定义主线层级</b>（如 <code>appsys</code>）一次性批量创建并挂载拓扑节点。
+     后端接口：<code>POST /api/v3/batch/create/instance/object/&lt;obj_id&gt;</code></p>
+
+  <div class="card">
+    <b>当前主线拓扑链</b>
+    <div class="chain" id="chain"><span class="hint">加载中…</span></div>
+  </div>
+
+  <div class="card">
+    <label>① 选择目标层级（在该层级下批量创建节点）</label>
+    <select id="level"></select>
+
+    <label>② 选择父节点（新节点将挂载到其下）</label>
+    <div class="row">
+      <div>
+        <select id="parentNode"></select>
+        <div class="hint">父级对象：<span id="parentLevel">—</span>（下拉自动列出该父级现有实例）</div>
+      </div>
+    </div>
+
+    <div class="row" style="margin-top:10px">
+      <div>
+        <label style="margin-top:0">bk_parent_id（父实例 ID）</label>
+        <input id="parentId" type="number" min="0" placeholder="如 1" />
+      </div>
+      <div>
+        <label style="margin-top:0">bk_biz_id（所属业务 ID）</label>
+        <input id="bizId" type="number" min="0" value="1" placeholder="如 1" />
+      </div>
+    </div>
+    <div class="hint">提示：父级选择为「业务(biz)」时，bk_biz_id 会自动同步为该业务 ID。</div>
+
+    <label>③ 待创建的节点名称（每行一个）</label>
+    <textarea id="names" placeholder="应用系统-A&#10;应用系统-B&#10;应用系统-C"></textarea>
+    <div class="hint">名称将写入该层级的名称字段（自定义对象为 <code>bk_inst_name</code>）。</div>
+
+    <div style="margin-top:16px">
+      <button id="run" onclick="runBatch()">批量挂载</button>
+      <button class="ghost" id="refresh" onclick="reloadParents()">刷新父级列表</button>
+    </div>
+    <div id="status"></div>
+  </div>
+
+  <div class="card" id="resultCard" style="display:none">
+    <b>执行结果</b>
+    <div id="result"></div>
+  </div>
+</div>
+
+<script>
+const API = '/api/v3';
+// 内置对象的「名称字段」与「实例 ID 字段」映射
+const NAME_FIELD = { biz:'bk_biz_name', set:'bk_set_name', module:'bk_module_name', host:'bk_host_name' };
+const ID_FIELD   = { biz:'bk_biz_id',  set:'bk_set_id',   module:'bk_module_id',  host:'bk_host_id' };
+const nameField = id => NAME_FIELD[id] || 'bk_inst_name';
+const idField   = id => ID_FIELD[id]   || 'bk_inst_id';
+
+let chain = [];
+
+async function api(path, body){
+  const opt = { method: body!==undefined ? 'POST':'GET',
+                headers:{'Content-Type':'application/json'}, credentials:'same-origin' };
+  if(body!==undefined) opt.body = JSON.stringify(body);
+  const r = await fetch(API + path, opt);
+  return r.json();
+}
+
+function instId(it){
+  return it.bk_inst_id ?? it.bk_biz_id ?? it.bk_set_id ?? it.bk_module_id ?? it.bk_host_id ?? it.bk_inst_id;
+}
+
+async function loadChain(){
+  const d = await api('/find/topomodelmainline', {});
+  chain = (d.data || []);
+  const box = document.getElementById('chain');
+  box.innerHTML = '';
+  chain.forEach((o,i)=>{
+    const c = document.createElement('span'); c.className='chip';
+    c.textContent = `${o.bk_obj_name} (${o.bk_obj_id})`; box.appendChild(c);
+    if(i < chain.length-1){ const a=document.createElement('span'); a.className='arrow'; a.textContent='→'; box.appendChild(a); }
+  });
+  // 层级下拉：排除最后一个叶子（如 host），其下无法再挂载子节点
+  const sel = document.getElementById('level');
+  sel.innerHTML='';
+  for(let i=0;i<chain.length-1;i++){
+    const o=chain[i];
+    const op=document.createElement('option'); op.value=o.bk_obj_id; op.textContent=`${o.bk_obj_name} (${o.bk_obj_id})`;
+    sel.appendChild(op);
+  }
+  await reloadParents();
+}
+
+function parentOf(level){
+  for(const o of chain){ if(o.bk_next_obj===level) return o.bk_obj_id; }
+  return null;
+}
+
+async function reloadParents(){
+  const level = document.getElementById('level').value;
+  const parent = parentOf(level);
+  document.getElementById('parentLevel').textContent = parent ? `${parent}` : '(无父级/根)';
+  const psel = document.getElementById('parentNode');
+  psel.innerHTML = '<option value="">— 手动输入 bk_parent_id —</option>';
+  if(parent){
+    try{
+      const d = await api(`/find/instance/object/${parent}`, {condition:{}, fields:[], page:{start:0,limit:500}});
+      const info = (d.data && d.data.info) || [];
+      for(const it of info){
+        const nm = it[nameField(parent)] || it.bk_inst_name || instId(it);
+        const op=document.createElement('option');
+        op.value = instId(it);
+        op.textContent = `${nm} (${instId(it)})`;
+        psel.appendChild(op);
+      }
+    }catch(e){ console.warn('加载父级失败', e); }
+  }
+}
+
+document.getElementById('level').addEventListener('change', reloadParents);
+document.getElementById('parentNode').addEventListener('change', ()=>{
+  const pid = document.getElementById('parentNode').value;
+  if(pid){
+    document.getElementById('parentId').value = pid;
+    const parent = parentOf(document.getElementById('level').value);
+    if(parent==='biz') document.getElementById('bizId').value = pid;
+  }
+});
+
+async function runBatch(){
+  const level = document.getElementById('level').value;
+  const parentId = parseInt(document.getElementById('parentId').value, 10);
+  const bizId = parseInt(document.getElementById('bizId').value, 10);
+  const names = document.getElementById('names').value
+                  .split('\n').map(s=>s.trim()).filter(Boolean);
+  const status = document.getElementById('status');
+  const btn = document.getElementById('run');
+
+  if(!level){ status.textContent='请先选择目标层级'; return; }
+  if(!Number.isFinite(parentId)){ status.textContent='bk_parent_id 必须是数字'; return; }
+  if(!Number.isFinite(bizId)){ status.textContent='bk_biz_id 必须是数字'; return; }
+  if(names.length===0){ status.textContent='请至少填写一个节点名称'; return; }
+
+  btn.disabled = true; status.textContent = `正在批量创建 ${names.length} 个节点…`;
+  const nf = nameField(level);
+  const instances = names.map(n => ({ [nf]: n, bk_parent_id: parentId, bk_biz_id: bizId }));
+
+  let res;
+  try{
+    res = await api(`/batch/create/instance/object/${level}`, { instances });
+  }catch(e){ status.textContent = '请求失败：'+e; btn.disabled=false; return; }
+
+  btn.disabled = false;
+  const data = res.data || {};
+  const ok = data.info || [];
+  const err = data.error || [];
+  status.textContent = `完成：成功 ${ok.length} 个，失败 ${err.length} 个。`;
+  renderResult(names, ok, err);
+}
+
+function renderResult(names, ok, err){
+  const card = document.getElementById('resultCard');
+  const box = document.getElementById('result');
+  card.style.display='block';
+  // 建立 index -> 结果 映射
+  const okMap = {}; ok.forEach(o=>okMap[o.index]=o);
+  const errMap = {}; err.forEach(e=>errMap[e.index]=e);
+  let rows='';
+  names.forEach((nm,i)=>{
+    if(okMap[i]){
+      rows += `<tr><td>${i+1}</td><td>${escapeHtml(nm)}</td>
+               <td><span class="badge ok">成功</span></td>
+               <td>bk_inst_id = <b>${okMap[i].bk_inst_id}</b></td></tr>`;
+    }else if(errMap[i]){
+      rows += `<tr><td>${i+1}</td><td>${escapeHtml(nm)}</td>
+               <td><span class="badge err">失败</span></td>
+               <td>${escapeHtml(errMap[i].message)}</td></tr>`;
+    }else{
+      rows += `<tr><td>${i+1}</td><td>${escapeHtml(nm)}</td>
+               <td><span class="badge err">未处理</span></td><td></td></tr>`;
+    }
+  });
+  box.innerHTML = `<table>
+    <thead><tr><th>#</th><th>名称</th><th>状态</th><th>详情</th></tr></thead>
+    <tbody>${rows}</tbody></table>`;
+}
+
+function escapeHtml(s){ return String(s).replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+
+loadChain().catch(e=>{ document.getElementById('chain').innerHTML = '<span class="hint">加载主线链失败：'+e+'</span>'; });
+</script>
+</body>
+</html>

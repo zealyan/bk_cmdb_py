@@ -226,6 +226,20 @@ def login():
     return Response(_render_login(msg), mimetype="text/html")
 
 
+@app.route("/tools/batch-mount")
+def batch_mount_tool():
+    """开发工具：为自定义主线层级（如 appsys）批量挂载新节点。
+
+    独立的单页工具（prod_bin/ui/batch_mount.html），直接走浏览器同源的
+    /api/v3 代理调用后端 batch/create/instance/object/<obj_id>，无需改动编译后的 Vue。
+    """
+    html_path = os.path.join(PROD_UI_DIR, "batch_mount.html")
+    if os.path.exists(html_path):
+        with open(html_path, "r", encoding="utf-8") as f:
+            return Response(f.read(), mimetype="text/html")
+    return make_response(jsonify_error("批量挂载工具页面不存在"), 404)
+
+
 @app.route("/logout", methods=["GET", "POST"])
 def logout():
     bk_token = request.cookies.get("bk_token")

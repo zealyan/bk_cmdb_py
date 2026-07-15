@@ -1753,84 +1753,127 @@ def find_topoinstnode_host_serviceinst_count(biz_id):
         return make_response(result=False, code=500, message=str(e))
 
 
+class _InstanceCreateError(Exception):
+    """创建实例时校验/唯一性失败，携带可供前端展示的错误信息。"""
+    def __init__(self, message):
+        self.message = message
+
+
+def _create_one_instance(obj_id, req_data):
+    """创建单个对象实例的核心逻辑（单条与批量创建共用）。
+
+    成功返回新实例主键 id（int）；失败抛出 _InstanceCreateError(message)。
+    注意：bk_parent_id / bk_biz_id 等拓扑挂接字段由调用方在 req_data 中传入，
+    本函数不自动推算父级（对齐主线层级「新增节点」语义）。
+    """
+    id_field = get_inst_id_field(obj_id)
+    # 后端自动生成的主键字段（不计入必填校验）
+    auto_id_props = {
+        "bk_biz_id", "bk_set_id", "bk_module_id", "bk_inst_id",
+        "bk_host_id", "bk_process_id", "bk_cloud_id", "bk_biz_set_id",
+    }
+    # 缺失时由后端自动派生的必填字段（保持数据完整，避免仅填名称即被拒）
+    auto_fill_props = {"bk_asset_id"}
+
+    collection_name = get_inst_collection_name(obj_id)
+    collection = get_mongo_collection(collection_name)
+    conn = get_db_connection()
+    # 提前生成自增 ID，供缺失必填字段派生（如 bk_asset_id）
+    next_id = next_sequence(conn, collection_name)
+
+    # 后端必填校验（兜底，前端 v-validate 已拦截；此处防止绕过）：
+    # 仅校验 cc_ObjAttDes 中 is_required=true 且非「后端自动生成 ID 字段」的属性。
+    att_collection = get_mongo_collection('cc_ObjAttDes')
+    required_attrs = list(att_collection.find(
+        {"bk_obj_id": obj_id, "is_required": True},
+        {"bk_property_id": 1, "bk_property_name": 1},
+    ))
+    missing = []
+    for a in required_attrs:
+        pid = a.get("bk_property_id")
+        if pid in auto_id_props:
+            continue
+        # 可自动派生的必填字段：缺失时补默认值，不计入缺失清单
+        if pid in auto_fill_props and not req_data.get(pid):
+            req_data[pid] = _derive_asset_id(obj_id, next_id)
+            continue
+        val = req_data.get(pid)
+        if val is None or (isinstance(val, str) and val.strip() == ""):
+            missing.append(a.get("bk_property_name") or pid)
+    if missing:
+        raise _InstanceCreateError("以下必填项不能为空: " + "、".join(missing))
+
+    # 获取实例数据，过滤掉 None 值但保留空字符串和 0
+    instance_data = {k: v for k, v in req_data.items() if v is not None}
+
+    # 用真实主键字段写入（host->bk_host_id，通用对象->bk_inst_id …）
+    instance_data[id_field] = next_id
+    # 资产编号（bk_asset_id）为空时派生默认值，保证字段完整（其为非必填可选字段）
+    _asset = instance_data.get("bk_asset_id")
+    if _asset is None or (isinstance(_asset, str) and _asset.strip() == ""):
+        instance_data["bk_asset_id"] = _derive_asset_id(obj_id, next_id)
+    instance_data.setdefault("bk_supplier_account", "0")
+    instance_data.setdefault("bk_data_status", "active")
+    instance_data.setdefault("create_time", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+    instance_data.setdefault("last_time", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+
+    # 唯一约束校验（对齐 Go validator_unique.go）
+    try:
+        validate_unique_constraint(obj_id, instance_data, collection_name)
+    except ModelError as e:
+        raise _InstanceCreateError(str(e))
+
+    collection.insert_one(instance_data)
+    return next_id
+
+
 @object_bp.route('/create/instance/object/<obj_id>', methods=['POST'])
 def create_instance(obj_id):
-    """创建对象实例"""
+    """创建对象实例（单条）。"""
     try:
         req_data = _parse_body()
-
+        cid = _create_one_instance(obj_id, req_data)
         id_field = get_inst_id_field(obj_id)
-        # 后端自动生成的主键字段（不计入必填校验）
-        auto_id_props = {
-            "bk_biz_id", "bk_set_id", "bk_module_id", "bk_inst_id",
-            "bk_host_id", "bk_process_id", "bk_cloud_id", "bk_biz_set_id",
-        }
-        # 缺失时由后端自动派生的必填字段（保持数据完整，避免仅填名称即被拒）
-        auto_fill_props = {"bk_asset_id"}
+        return make_response(data={
+            "bk_inst_id": cid,
+            id_field: cid,
+            "id": cid,
+        })
+    except _InstanceCreateError as e:
+        return make_response(result=False, code=500, message=e.message)
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return make_response(result=False, code=500, message=str(e))
 
-        collection_name = get_inst_collection_name(obj_id)
-        collection = get_mongo_collection(collection_name)
-        conn = get_db_connection()
-        # 提前生成自增 ID，供缺失必填字段派生（如 bk_asset_id）
-        next_id = next_sequence(conn, collection_name)
 
-        # 后端必填校验（兜底，前端 v-validate 已拦截；此处防止绕过）：
-        # 仅校验 cc_ObjAttDes 中 is_required=true 且非「后端自动生成 ID 字段」的属性。
-        att_collection = get_mongo_collection('cc_ObjAttDes')
-        required_attrs = list(att_collection.find(
-            {"bk_obj_id": obj_id, "is_required": True},
-            {"bk_property_id": 1, "bk_property_name": 1},
-        ))
-        missing = []
-        for a in required_attrs:
-            pid = a.get("bk_property_id")
-            if pid in auto_id_props:
+@object_bp.route('/api/v3/batch/create/instance/object/<obj_id>', methods=['POST'])
+@object_bp.route('/batch/create/instance/object/<obj_id>', methods=['POST'])
+def batch_create_instance(obj_id):
+    """批量创建对象实例 —— 主线层级「批量挂载新节点」的后端能力。
+
+    入参: { "instances": [ {bk_inst_name:.., bk_parent_id:.., bk_biz_id:.., ...}, ... ] }
+          （也兼容直接传数组 / { "data": [...] }）
+    返回: { "info":  [ {index, bk_inst_id, id}, ... ],   # 创建成功的实例
+            "error": [ {index, message}, ... ] }          # 失败项（不影响其余项）
+    每条实例的 bk_parent_id 决定其在拓扑中的挂接位置（如挂到某业务的 appsys 节点下）。
+    """
+    try:
+        req = _parse_body()
+        items = req.get("instances") or req.get("data") or []
+        if not isinstance(items, list):
+            items = [req]
+        created, errors = [], []
+        for idx, item in enumerate(items):
+            if not isinstance(item, dict):
+                errors.append({"index": idx, "message": "实例数据必须是对象"})
                 continue
-            # 可自动派生的必填字段：缺失时补默认值，不计入缺失清单
-            if pid in auto_fill_props and not req_data.get(pid):
-                req_data[pid] = _derive_asset_id(obj_id, next_id)
-                continue
-            val = req_data.get(pid)
-            if val is None or (isinstance(val, str) and val.strip() == ""):
-                missing.append(a.get("bk_property_name") or pid)
-        if missing:
-            return make_response(
-                result=False, code=500,
-                message="以下必填项不能为空: " + "、".join(missing),
-            )
-
-        # 获取实例数据，过滤掉 None 值但保留空字符串和 0
-        instance_data = {k: v for k, v in req_data.items() if v is not None}
-
-        # 用真实主键字段写入（host->bk_host_id，通用对象->bk_inst_id …）
-        instance_data[id_field] = next_id
-        # 资产编号（bk_asset_id）为空时派生默认值，保证字段完整（其为非必填可选字段）
-        _asset = instance_data.get("bk_asset_id")
-        if _asset is None or (isinstance(_asset, str) and _asset.strip() == ""):
-            instance_data["bk_asset_id"] = _derive_asset_id(obj_id, next_id)
-        instance_data.setdefault("bk_supplier_account", "0")
-        instance_data.setdefault("bk_data_status", "active")
-        instance_data.setdefault("create_time", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
-        instance_data.setdefault("last_time", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
-
-        # 唯一约束校验（对齐 Go validator_unique.go）
-        try:
-            validate_unique_constraint(obj_id, instance_data, collection_name)
-        except ModelError as e:
-            return make_response(result=False, code=e.code if hasattr(e, 'code') else 11000,
-                                  message=str(e))
-
-        result = collection.insert_one(instance_data)
-
-        if result.inserted_id:
-            return make_response(data={
-                "bk_inst_id": next_id,
-                id_field: next_id,
-                "id": next_id,
-            })
-        else:
-            return make_response(result=False, code=500, message="创建实例失败")
-
+            try:
+                cid = _create_one_instance(obj_id, item)
+                created.append({"index": idx, "bk_inst_id": cid, "id": cid})
+            except _InstanceCreateError as e:
+                errors.append({"index": idx, "message": e.message})
+        return make_response(data={"info": created, "error": errors})
     except Exception as e:
         import traceback
         traceback.print_exc()
