@@ -5,10 +5,13 @@
 > **连接 / 操作 / 资源使用** 中哪些性能提升逻辑已被复刻。
 >
 > 结论速览：
-> - **目录镜像**：Go `common/` 的 9 个核心子包 + `storage/dal/mongo` + `storage/driver/mongodb`
+> - **目录镜像**：Go `common/` 的 11 个核心子包 + `storage/dal/mongo` + `storage/driver/mongodb`
 >   已在 `cmdb_server_py/app/common/` 下 1:1 落位（见 §1）。
 > - **MongoDB 性能逻辑**：连接池、超时、操作指标、读偏好、原子序列、重复键分类
 >   全部复刻（见 §2）。
+> - **本次新增（纯 Python 包）**：`version` / `mapstruct` / `selector` 已完整复刻并测试（见 §1.1）。
+> - **按决策不复刻**：`zkclient`、`storage/driver/redis`、`common/lock`、`watch`/`stream`/`reflector`
+>   依赖 ZooKeeper / Redis / 事件流，超出最小依赖部署范围（见 §1.1 标注 ⏸ 与文末说明）。
 
 ---
 
@@ -22,20 +25,20 @@
 | `common/condition` | `app/common/condition` | ✅ 已实现 | `Condition` 构建器：`Eq/Ne/In/Nin/Gt/Gte/Lt/Lte/Regex` → `to_filter()` |
 | `common/errors` | `app/common/errors` | ✅ 已实现 | `is_duplicated_error` / `get_duplicate_key` / `is_not_found_error`（移植自 `mongod.go`） |
 | `common/json` | （Python 内置 `json`） | ➖ 等价 | 语言级能力，无需独立包 |
-| `common/lock` | — | ⏸ 未复刻 | 分布式锁，依赖 Redis/ZK；最小依赖部署下暂不需要 |
+| `common/lock` | — | ⏸ 未复刻 | 分布式锁，依赖 Redis（本次决策：不复制 Redis 层，故 lock 一并跳过） |
 | `common/mapstr` | `app/common/mapstr` | ✅ 已实现 | `MapStr(dict)` 的 `String/Bool/Int64/MapStr` 访问器 |
-| `common/mapstruct` | — | ⏸ 未复刻 | 结构体映射，当前路由未触发 |
+| `common/mapstruct` | `app/common/mapstruct` | ✅ 已实现 | `struct_to_map` / `map_to_struct` / `map_to_struct_with_hook`（含 duration 钩子） |
 | `common/metadata` | `app/common/types` | 🟡 部分 | 以 `types` 常量 + 哨兵错误 + 读偏好枚举承载（非全量） |
 | `common/metric`, `common/metrics` | `app/common/metric` | ✅ 已实现 | `MongoMetrics`：按 `(集合,操作)` 累计次数/耗时/错误，线程安全 |
 | `common/paraparse` | `app/common/querybuilder` | 🟡 部分 | 查询解析能力收敛进 `build_filter/build_sort/build_projection` |
 | `common/querybuilder` | `app/common/querybuilder` | ✅ 已实现 | `build_filter` / `build_sort` / `build_projection` |
-| `common/selector` | — | ⏸ 未复刻 | 资源选择器，当前未用到 |
+| `common/selector` | `app/common/selector` | ✅ 已实现 | `Selector`/`Selectors`/`Labels` 校验 + `to_mgo_filter`（labels 选择器→Mongo） |
 | `common/types` | `app/common/types` | ✅ 已实现 | 哨兵错误、读偏好枚举、集合名常量 |
 | `common/util` | `app/common/util` | ✅ 已实现 | `conver_to_interface_slice` / `get_int32_by_interface` 移植 |
-| `common/version` | — | ⏸ 未复刻 | 仅版本号常量 |
-| `common/watch` | — | ⏸ 未复刻 | 事件 watch 流，依赖 `storage/stream` |
+| `common/version` | `app/common/version` | ✅ 已实现 | 版本常量 + `get_version` / `show_version` |
+| `common/watch` | — | ⏸ 未复刻 | 事件 watch 流（依赖 `storage/stream`，超出最小部署范围） |
 | `common/webservice` | （Flask Blueprint） | ➖ 等价 | 由 `app/routes/*` 的 Blueprint 承载 |
-| `common/zkclient` | — | ⏸ 未复刻 | 最小依赖部署明确移除 ZooKeeper |
+| `common/zkclient` | — | ⏸ 未复刻 | ZooKeeper 客户端（本次决策：zk/redis 均不复制） |
 | `common/identification`, `common/auth`, `common/cryptor` | `app/auth/*` | 🟡 对应 | 鉴权在 `app/auth`（internal 模式），非 `common` 直译 |
 
 ### 1.2 Go `storage/*` → Python `app/common/mongo/*`
@@ -49,8 +52,8 @@
 | `storage/dal/mongo/local/mongo.go`（`NextSequence/NextSequences`） | `app/common/mongo/sequence.py` | ✅ 已实现 | `find_one_and_update` `$inc` + `redirectTable` 分表重定向 |
 | `storage/driver/mongodb` | `app/common/mongo/__init__.py` | ✅ 已实现 | 公共 API 再导出 |
 | `storage/dal/types` | `app/common/dal/__init__.py` | 🟡 部分 | `new_rdb` → `new_mgo` 桥接 |
-| `storage/dal/redis`, `storage/driver/redis` | — | ⏸ 未复刻 | Redis 在最小依赖下仍被部分核心服务需要，后续单独评估 |
-| `storage/reflector`, `storage/stream` | — | ⏸ 未复刻 | watch/事件流，开发期未启用 |
+| `storage/dal/redis`, `storage/driver/redis` | — | ⏸ 未复刻 | Redis 驱动（本次决策：不复制 Redis 层；后续若启用 Redis 再补 `app/common/redis`） |
+| `storage/reflector`, `storage/stream` | — | ⏸ 未复刻 | watch/事件流（超出最小部署范围） |
 
 ### 1.3 顶层模块对照
 
@@ -62,6 +65,11 @@
 | `web_server` | `ui_server.py` | 🟡 UI 入口/代理 |
 
 **图例**：✅ 已实现　🟡 部分/对应　➖ 语言级等价　⏸ 未复刻（当前部署不需要）
+
+> **本次复刻范围（用户决策）**：仅完整复刻**纯 Python 包** `version` / `mapstruct` / `selector`
+> （无外部基础设施依赖，已通过功能测试）。`zkclient`（ZooKeeper）、`storage/driver/redis`、
+> `common/lock`（依赖 Redis）、`watch` / `storage/stream` / `storage/reflector`（事件流）均**按决策跳过**，
+> 因其依赖 ZooKeeper / Redis / 事件流，超出最小依赖部署目标。后续若启用 Redis 或事件同步，再补对应层。
 
 ---
 

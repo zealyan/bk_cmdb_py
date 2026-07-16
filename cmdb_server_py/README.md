@@ -61,7 +61,7 @@ curl http://127.0.0.1:3000/init/check  # 返回 cmdb 实例的集合与计数
 | 数据访问层 | `app/models/db.py` | — | `get_db_connection()` / `get_mongo_collection()` / `is_mongo_available()` |
 | 连接校验 | `check_db.py` | — | 校验 `cmdb` 实例连接与核心集合 |
 | 启动编排（完整系统） | `../start_ui_system.sh` | — | 最小依赖：仅拉起 MongoDB + `app.py` + `ui_server.py` |
-| **Go 复刻层** | `app/common/*` | — | 镜像 bk-cmdb Go `common/` + `storage/dal/mongo`：连接池 / 操作指标 / 读偏好 / 原子序列 / 错误分类 |
+| **Go 复刻层** | `app/common/*` | — | 镜像 bk-cmdb Go `common/` + `storage/dal/mongo`：`version`/`mapstruct`/`selector`/`condition`/`errors`/`mapstr`/`querybuilder`/`util`/`types`/`metric`/`mongo`（连接池/指标/读偏好/原子序列/错误分类） |
 
 ### 2.1 MongoDB 性能逻辑复刻（对齐 Go `storage/dal/mongo`）
 

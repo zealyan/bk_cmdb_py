@@ -51,3 +51,14 @@ BK_TABLE_NAME_INST_ASST = "cc_InstAsst"
 BK_TABLE_NAME_BASE_INST = "cc_BaseInst"
 BK_TABLE_NAME_DEL_ARCHIVE = "cc_DelArchive"
 BK_TABLE_NAME_ID_GENERATOR = "cc_idgenerator"
+
+
+# ---------------------------------------------------------------------------
+# MongoDB 操作符常量（对应 Go common.BKDB*）
+# ---------------------------------------------------------------------------
+
+BK_DB_IN = "$in"
+BK_DB_NIN = "$nin"
+BK_DB_EXISTS = "$exists"
+BK_DB_NE = "$ne"
+BK_DB_AND = "$and"
