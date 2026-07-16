@@ -1907,6 +1907,38 @@ def find_topoinst_by_host(bk_biz_id, bk_host_id):
         return make_response(result=False, code=500, message=str(e))
 
 
+def _resolve_mainline_object_to_module_ids(conn, supplier, bk_biz_id, obj_id, inst_id):
+    """沿主线链从 obj_id 实例向下遍历到 module，收集其下游所有 module id。
+
+    与 admin_routes._resolve_mainline_object_to_module_ids 同源逻辑：对齐 Go
+    scene_server/host_server/logics/object.go GetSetIDByObjectCond + hostsearch.go
+    searchByMainline/searchByModule。用于拓扑节点主机/服务实例统计。
+    注意各层主键字段不同（set->bk_set_id、module->bk_module_id、自定义->bk_inst_id），
+    按 get_inst_id_field 取，bk_parent_id 统一挂接。
+    """
+    chain = get_mainline_chain(supplier)
+    if obj_id not in chain:
+        return []
+    idx = chain.index(obj_id)
+    cur_ids = {inst_id}
+    for o in chain[idx + 1:]:
+        id_field = get_inst_id_field(o)
+        if o == "module":
+            mods = list(conn.cc_ModuleBase.find(
+                {"bk_biz_id": bk_biz_id, "bk_parent_id": {"$in": list(cur_ids)},
+                 "bk_data_status": {"$ne": "disabled"}},
+                {id_field: 1, "_id": 0}))
+            return [m[id_field] for m in mods]
+        coll = conn[get_inst_collection_name(o)]
+        docs = list(coll.find(
+            {"bk_biz_id": bk_biz_id, "bk_parent_id": {"$in": list(cur_ids)}},
+            {id_field: 1, "_id": 0}))
+        cur_ids = {d[id_field] for d in docs}
+        if not cur_ids:
+            return []
+    return []
+
+
 @object_bp.route('/find/topoinstnode/host_serviceinst_count/<int:biz_id>', methods=['POST'])
 def find_topoinstnode_host_serviceinst_count(biz_id):
     """获取拓扑节点的主机和服务实例统计信息"""
@@ -1976,6 +2008,21 @@ def find_topoinstnode_host_serviceinst_count(biz_id):
             elif bk_obj_id == "biz":
                 # 统计业务下的所有主机
                 host_count = len(host_relations)
+            else:
+                # 自定义主线对象（如 appsys）：解析其下游所有 module，统计这些 module 的主机数。
+                # 与 hosts/search 的自定义主线解析同源（对齐 Go GetSetIDByObjectCond）。
+                # 原实现仅处理 module/set/biz，导致自定义主线节点 host_count 恒为 0、无法显示统计。
+                if bk_obj_id not in ("biz", "set", "module", "host"):
+                    coll = conn[get_inst_collection_name(bk_obj_id)]
+                    idoc = coll.find_one({get_inst_id_field(bk_obj_id): bk_inst_id},
+                                        {"bk_biz_id": 1, "_id": 0})
+                    real_biz = idoc.get("bk_biz_id", node_biz) if idoc else node_biz
+                    mod_ids = _resolve_mainline_object_to_module_ids(
+                        conn, "0", real_biz, bk_obj_id, bk_inst_id)
+                    host_count = len([r for r in get_relations(real_biz)
+                                      if r.get("bk_module_id") in set(mod_ids)]) if mod_ids else 0
+                else:
+                    host_count = 0
 
             result.append({
                 "bk_obj_id": bk_obj_id,
