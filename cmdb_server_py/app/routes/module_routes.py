@@ -76,7 +76,10 @@ def create_module(biz_id, set_id):
             "bk_supplier_account": bk_supplier_account,
             "bk_parent_id": set_id,
             "bk_parent_obj": "set",
-            "bk_service_category_id": req_data.get('bk_service_category_id', req_data.get('service_category_id', 1)),
+            # 对齐 Go 源码 BKServiceCategoryIDField="service_category_id"：cc_ModuleBase
+            # 模块服务分类存储字段即 service_category_id（非 bk_service_category_id）。
+            # 前端创建/编辑均发送 service_category_id。
+            "service_category_id": req_data.get('service_category_id', req_data.get('bk_service_category_id', 1)),
             "create_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "last_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "bk_data_status": "enabled",
@@ -164,12 +167,13 @@ def search_module(supplier_account, biz_id, set_id):
                 "bk_supplier_account": m.get("bk_supplier_account"),
                 "bk_parent_id": m.get("bk_parent_id"),
                 "bk_parent_obj": m.get("bk_parent_obj"),
-                # 前端 FormServiceCategory / node-extra-info-service-template 读取服务分类时
-                # 用的是 instance.service_category_id（见 form-service-category.vue setupValue），
-                # 而数据库存储字段为 bk_service_category_id。两者需同时返回：bk_service_category_id
-                # 用于内部透传，service_category_id 用于前端显示/编辑初始化。
-                "bk_service_category_id": m.get("bk_service_category_id"),
-                "service_category_id": m.get("bk_service_category_id"),
+                # 对齐 Go 源码 BKServiceCategoryIDField="service_category_id"：
+                # cc_ModuleBase 真正存储字段是 service_category_id（非 bk_service_category_id）。
+                # 前端 FormServiceCategory / node-extra-info-service-template 读 instance.service_category_id
+                # （见 form-service-category.vue setupValue）。优先取真实字段 service_category_id，
+                # 回退到历史遗留的 bk_service_category_id，保证两种数据都能正确显示/编辑初始化。
+                "bk_service_category_id": m.get("service_category_id", m.get("bk_service_category_id")),
+                "service_category_id": m.get("service_category_id", m.get("bk_service_category_id")),
                 # 拓扑树实例标识字段：与 bk_module_id/bk_module_name 对齐
                 "bk_inst_id": m.get("bk_inst_id", m.get("bk_module_id")),
                 "bk_inst_name": m.get("bk_inst_name", m.get("bk_module_name")),
@@ -216,11 +220,12 @@ def update_module(biz_id, set_id, module_id):
             "last_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         }
         
-        # 服务分类字段：前端编辑模块表单使用 service_category_id，
-        # 存储字段为 bk_service_category_id（对齐 cc_ModuleBase）。两者都接受。
-        svc_cat = req_data.get("bk_service_category_id", req_data.get("service_category_id"))
+        # 服务分类字段：对齐 Go 源码 BKServiceCategoryIDField="service_category_id"，
+        # cc_ModuleBase 存储字段即 service_category_id（非 bk_service_category_id）。
+        # 前端编辑/创建均发送 service_category_id，后端原样写回 service_category_id。
+        svc_cat = req_data.get("service_category_id", req_data.get("bk_service_category_id"))
         if svc_cat is not None:
-            update_fields["bk_service_category_id"] = svc_cat
+            update_fields["service_category_id"] = svc_cat
         
         if "bk_module_name" in req_data and req_data["bk_module_name"] is not None:
             update_fields["bk_module_name"] = req_data["bk_module_name"]

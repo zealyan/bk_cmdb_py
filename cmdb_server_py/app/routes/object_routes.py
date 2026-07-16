@@ -430,12 +430,13 @@ def _make_topo_node(inst, obj_id, obj_name_map=None, name_field=None, id_field=N
         "child": [],
     }
     # 模块节点需透传服务分类：前端「模块节点信息」面板（FormServiceCategory /
-    # node-extra-info-service-template）读的是 instance.service_category_id，而数据库
-    # 存储字段为 bk_service_category_id。拓扑树节点（find/topoinst 等）是面板数据源之一，
-    # 两者需同时返回，否则刷新业务拓扑后服务分类显示为空。仅对 module 对象补，不影响其它层级。
+    # node-extra-info-service-template）读的是 instance.service_category_id。
+    # 对齐 Go 源码 BKServiceCategoryIDField="service_category_id"：cc_ModuleBase 真实存储
+    # 字段即 service_category_id，历史数据可能仍是 bk_service_category_id（旧字段名）。
+    # 优先取 service_category_id，回退到 bk_service_category_id，确保拓扑树刷新后服务分类不丢。
     if obj_id == "module":
-        node["bk_service_category_id"] = inst.get("bk_service_category_id")
-        node["service_category_id"] = inst.get("bk_service_category_id")
+        node["bk_service_category_id"] = inst.get("service_category_id", inst.get("bk_service_category_id"))
+        node["service_category_id"] = inst.get("service_category_id", inst.get("bk_service_category_id"))
     return node
 
 
@@ -2650,7 +2651,7 @@ def create_resource_directory():
             "bk_parent_obj": "set",
             # 自定资源目录标志（DefaultResSelfDefinedModuleFlag=4），与内置空闲机/故障机/待回收(1/2/3)区分
             "default": 4,
-            "bk_service_category_id": 0,
+            "service_category_id": 0,
             "bk_service_template_id": 0,
             "set_template_id": 0,
             "bk_module_type": "1",
@@ -2917,7 +2918,7 @@ def _ensure_idle_module(conn, biz_id):
         "bk_parent_id": set_id,
         "bk_parent_obj": "set" if set_id else None,
         "default": 1,
-        "bk_service_category_id": 0,
+        "service_category_id": 0,
         "bk_service_template_id": 0,
         "set_template_id": 0,
         "bk_module_type": "1",
@@ -2984,7 +2985,7 @@ def _ensure_business_idle_pool(conn, biz_id):
             "bk_parent_id": set_id,
             "bk_parent_obj": "set",
             "default": dflt,
-            "bk_service_category_id": 0,
+            "service_category_id": 0,
             "bk_service_template_id": 0,
             "set_template_id": 0,
             "bk_module_type": str(dflt),
