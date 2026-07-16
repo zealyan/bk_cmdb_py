@@ -164,7 +164,12 @@ def search_module(supplier_account, biz_id, set_id):
                 "bk_supplier_account": m.get("bk_supplier_account"),
                 "bk_parent_id": m.get("bk_parent_id"),
                 "bk_parent_obj": m.get("bk_parent_obj"),
+                # 前端 FormServiceCategory / node-extra-info-service-template 读取服务分类时
+                # 用的是 instance.service_category_id（见 form-service-category.vue setupValue），
+                # 而数据库存储字段为 bk_service_category_id。两者需同时返回：bk_service_category_id
+                # 用于内部透传，service_category_id 用于前端显示/编辑初始化。
                 "bk_service_category_id": m.get("bk_service_category_id"),
+                "service_category_id": m.get("bk_service_category_id"),
                 # 拓扑树实例标识字段：与 bk_module_id/bk_module_name 对齐
                 "bk_inst_id": m.get("bk_inst_id", m.get("bk_module_id")),
                 "bk_inst_name": m.get("bk_inst_name", m.get("bk_module_name")),
