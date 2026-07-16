@@ -421,7 +421,7 @@ def _make_topo_node(inst, obj_id, obj_name_map=None, name_field=None, id_field=N
     if id_field is None:
         id_field = get_inst_id_field(obj_id)
     obj_name = (obj_name_map or {}).get(obj_id) if obj_name_map else OBJ_NAME_MAP.get(obj_id, obj_id)
-    return {
+    node = {
         "bk_inst_id": inst.get(id_field),
         "bk_inst_name": inst.get(name_field, ""),
         "bk_obj_id": obj_id,
@@ -429,6 +429,12 @@ def _make_topo_node(inst, obj_id, obj_name_map=None, name_field=None, id_field=N
         "default": inst.get("default", inst.get("bk_default", 0)),
         "child": [],
     }
+    # 模块节点需透传服务分类：刷新业务拓扑时，前端「模块节点信息」面板的数据源就是
+    # 这棵拓扑树（find/topoinst），若节点不含 bk_service_category_id，编辑保存后再刷新
+    # 服务分类会显示为空。仅对 module 对象补该字段，不影响其它层级节点结构。
+    if obj_id == "module":
+        node["bk_service_category_id"] = inst.get("bk_service_category_id")
+    return node
 
 
 def build_mainline_inst_tree(conn, supplier, bk_biz_id, with_idle_pool=True):
