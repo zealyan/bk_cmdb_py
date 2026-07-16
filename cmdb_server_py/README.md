@@ -61,6 +61,28 @@ curl http://127.0.0.1:3000/init/check  # 返回 cmdb 实例的集合与计数
 | 数据访问层 | `app/models/db.py` | — | `get_db_connection()` / `get_mongo_collection()` / `is_mongo_available()` |
 | 连接校验 | `check_db.py` | — | 校验 `cmdb` 实例连接与核心集合 |
 | 启动编排（完整系统） | `../start_ui_system.sh` | — | 最小依赖：仅拉起 MongoDB + `app.py` + `ui_server.py` |
+| **Go 复刻层** | `app/common/*` | — | 镜像 bk-cmdb Go `common/` + `storage/dal/mongo`：连接池 / 操作指标 / 读偏好 / 原子序列 / 错误分类 |
+
+### 2.1 MongoDB 性能逻辑复刻（对齐 Go `storage/dal/mongo`）
+
+`app/models/db.py` 仅保留兼容公共 API，真实连接 / 资源逻辑已下沉到 `app/common/mongo`：
+
+| 能力 | Go 来源 | Python 实现 |
+|---|---|---|
+| 连接池 / 超时 / 副本集 | `NewMgo` / `config.go` | `new_mgo(conf)`（`maxPoolSize=1000` / `minPoolSize=50` / `socketTimeoutMS=10000` / `replicaSet=rs0`） |
+| 每操作指标 | `metric.go` `mtc` | `MongoCommandListener`（driver 层自动采集，无需改路由）+ `app/common/metric` |
+| 读偏好 | `getCollectionOption` | `read_preference_ctx`(contextvars) → `PrimaryPreferred`/`SecondaryPreferred`…（`max_staleness=90s`） |
+| 原子序列 | `NextSequence` | `sequence.next_sequence`（`find_one_and_update $inc` + 分表 `redirectTable`） |
+| 重复键分类 | `IsDuplicatedError` | `errors.is_duplicated_error` / `get_duplicate_key` |
+
+> 目录 / 代码对照详见 [Go↔Python 复刻对照](docs/GO_PYTHON_CMDB_MIRROR.md)。
+
+### 2.2 运维端点
+
+| 端点 | 方法 | 作用 |
+|---|---|---|
+| `/api/v3/metrics/mongo` | GET | 导出 MongoDB 操作指标快照（按 `集合/操作` 维度：次数 / 耗时 / 错误） |
+| `/api/v3/metrics/mongo/reset` | POST | 清零指标 |
 
 ---
 

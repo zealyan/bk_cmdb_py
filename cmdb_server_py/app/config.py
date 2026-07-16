@@ -68,6 +68,24 @@ class Config:
     # 不再连接本项目私有的 bk_cmdb 库（其 mock 数据已清理）。
     MONGODB_URI = os.environ.get('MONGODB_URI') or 'mongodb://cc:cc@127.0.0.1:27017/cmdb?authSource=cmdb'
     MONGODB_DB = os.environ.get('MONGODB_DB') or 'cmdb'
+
+    # ---- MongoDB 连接池 / 超时（对齐 Go storage/dal/mongo/config.go）----
+    # 副本集名称（Go 必填 ReplicaSet；本地为 rs0）
+    MONGODB_REPLICA_SET = os.environ.get('MONGODB_REPLICA_SET') or 'rs0'
+    # 连接池最大连接数（Go MaxOpenConns，默认 1000，上限 3000）
+    MONGODB_MAX_POOL_SIZE = int(os.environ.get('MONGODB_MAX_POOL_SIZE') or 1000)
+    # 连接池最小空闲连接（Go MaxIdleConns，默认 50）
+    MONGODB_MIN_POOL_SIZE = int(os.environ.get('MONGODB_MIN_POOL_SIZE') or 50)
+    # socket 超时（秒，Go SocketTimeout，默认 10，区间 5~30）
+    MONGODB_SOCKET_TIMEOUT = int(os.environ.get('MONGODB_SOCKET_TIMEOUT') or 10)
+    # 连接超时（秒，Go NewMgo 传入 time.Minute）
+    MONGODB_CONNECT_TIMEOUT = int(os.environ.get('MONGODB_CONNECT_TIMEOUT') or 60)
+    # 连接最大空闲时间（秒，Go MaxConnIdleTime = 25min）
+    MONGODB_MAX_IDLE_TIME = int(os.environ.get('MONGODB_MAX_IDLE_TIME') or 25 * 60)
+    # 服务端选择超时（秒）
+    MONGODB_SERVER_SELECTION_TIMEOUT = int(os.environ.get('MONGODB_SERVER_SELECTION_TIMEOUT') or 30)
+    # 客户端应用名（Go AppName，用于连接标识）
+    MONGODB_APP_NAME = os.environ.get('MONGODB_APP_NAME') or 'cmdb_server_py'
     
     PGLITE_DATA_DIR = os.environ.get('PGLITE_DATA_DIR') or './pglite_data'
     

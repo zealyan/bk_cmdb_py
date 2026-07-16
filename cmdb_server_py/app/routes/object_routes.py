@@ -10,6 +10,25 @@ object_bp = Blueprint('object', __name__)
 # 原项目权限错误码
 PERMISSION_DENIED_CODE = 9900403
 
+
+@object_bp.route('/metrics/mongo', methods=['GET'])
+def mongo_metrics():
+    """导出 MongoDB 操作指标快照（对齐 Go mtc 采集，见 app/common/metric）。
+
+    返回 {collection}/{operation: {count, total_ms, avg_ms, errors}}。
+    """
+    from app.common.metric import get_metrics
+    return make_response(data=get_metrics().snapshot())
+
+
+@object_bp.route('/metrics/mongo/reset', methods=['POST'])
+def mongo_metrics_reset():
+    """清零 MongoDB 操作指标。"""
+    from app.common.metric import get_metrics
+    get_metrics().reset()
+    return make_response(message="mongo metrics reset")
+
+
 import re as _re
 
 
