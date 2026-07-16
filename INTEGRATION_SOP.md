@@ -1,98 +1,15 @@
 # bk-cmdb × Python 后端 集成 SOP（prod_bin UI 接入 cmdb_server_py）
 
-> 目标：在**不修改 Go 前端/后端源码**的前提下，让 prod_bin 的 CMDB UI 通过 Python 后端（`cmdb_server_py`）访问数据——
-> hzdz 视角下的主机统一视图由 Python 后端跨库投影，123 业务仍走 CMDB 原生 REST。
+> 当前开发目标：项目只做 **`ui_server.py`（Flask 前端服务） + `cmdb_server_py/app.py`（Python 后端）** 两个组件。
+> 完整系统以**最小依赖**运行：仅需 MongoDB（`cmdb` 实例 + initdb 原生数据），不依赖 Go 服务 / ZooKeeper / Redis。
+> `ui_server.py` 托管 prod_bin 静态 UI、渲染登录/首页、处理登录，并反向代理 `/api/v3` 到 `app.py`。
 
-## 1. 架构与端口
+## 1. 完整系统模式（最小依赖）
 
-| 角色 | 进程 | 端口 | 说明 |
-|------|------|------|------|
-| **BFF 集成网关** | `integrated_bff.py` (Flask) | **8083** | 单一入口：hzdz 端点本地处理，其余反代给 Go webserver，UI/静态资源反代给 Go webserver |
-| prod_bin UI / webserver | `cmdb_webserver` (Go) | **8084** | 渲染 `index.html` 模板、提供静态资源、处理登录、转发 123 API 到 apiserver（已从 8083 迁至 8084） |
-| Python 后端 | `app.py` (Flask) | 3000 | `cmdb_server_py` 本体，**直接连接 bk-cmdb 的 `cmdb` 实例**（与 Go 栈共享数据源，无独立库） |
-| CMDB apiserver | `cmdb_apiserver` (Go) | 8081 | 123 业务原生 REST（经 Go webserver 转发，不直接暴露） |
-| CMDB Mongo | `mongod` | 27017 | 单一 `cmdb` 库（bk-cmdb initdb 真实数据）；`bk_cmdb` mock 库已清理删除 |
+> 本文件记录当前**唯一运行模式**：**完整系统（最小依赖）**——仅由 `ui_server.py` 托管 prod_bin UI 并反向代理到 `app.py`，
+> **不启动任何 Go 服务 / ZooKeeper / Redis**，构成一个可独立运行的 CMDB 前端系统。
 
-**请求流**：
-```
-浏览器 ──> BFF :8083
-           ├── /api/v3/hosts/search*        → 本地：跨库读 cmdb.cc_HostBase/cc_ModuleHostConfig
-           │                                  （hzdz 视图：全部主机统一归属 HZ_VIEW_BIZ_ID=1）
-           ├── 其它 /api/v3/*                → 反代 Go webserver :8084 → apiserver :8081 （123）
-           └── / 及 /static/* /login/*       → 反代 Go webserver :8084 （UI 模板渲染 + 资源 + 登录）
-```
-
-## 2. 关键改动（仅运维脚本，未动 Go/前端源码）
-
-| 文件 | 改动 |
-|------|------|
-| `prod_bin/deploy/start.sh` | webserver 监听 `0.0.0.0:8083` → `:8084`；`PORT` 映射与提示同步 |
-| `prod_bin/deploy/run_stack.sh` | 自愈探活 `8083` → `8084`；`CMDB_PORTS` 中 8083 → 8084；新增 `start_python_stack()` 自愈拉起 `app.py`(3000) 与 BFF(8083) |
-| `cmdb_server_py/integrated_bff.py` | **新增** BFF 网关（见第 4 节） |
-| `cmdb_server_py/app.py` | 数据库改为连接 `cmdb` 实例（`MONGODB_DB=cmdb`）；移除 mock 初始化（`INIT_DATA` / `init_mock_data`） |
-
-> 为何迁移 webserver 端口：CMDB webserver 经 ZooKeeper 把 `/api/v3` 代理到 apiserver，无法改向；
-> 且 UI 的 `index.html` 是 **Go 模板**（由 webserver 渲染 `{{.site}}` 等），必须保留 webserver 渲染。
-> 故用 BFF 前置在 8083，webserver 退到 8084 作为上游。
-
-## 3. 启动顺序（已自动织入 run_stack 自愈）
-
-1. `run_stack.sh`（supervisord `cmdb-stack`，`autorestart=true`）拉起依赖 + 7 个 CMDB 服务 + migrate。
-2. `start_python_stack()`：确保 `app.py`(:3000) 与 `integrated_bff.py`(:8083) 运行。
-3. 自愈循环每 60s 探活 webserver(8084)/adminserver(60004)，异常则重拉并连带拉起 Python 栈。
-
-## 4. BFF 网关实现要点（`integrated_bff.py`）
-
-- **hzdz 本地端点** `/api/v3/hosts/search`(+`/web`)：只读投影 CMDB Mongo `cmdb`
-  （`cc_HostBase` + `cc_ModuleHostConfig`），把所有主机统一归属到 `HZ_VIEW_BIZ_ID`（默认 1），
-  返回 UI 期望结构 `{info:[{host,module,set,biz}], count}`。无需修改 CMDB 即可实现"hzdz 视角全部主机归 home biz"。
-- **反代**：其余 `/api/v3/*` 与 `/`、`/static/*`、`/login/*` 透传 `requests` 到 Go webserver(8084)，
-  转发 method/headers/body/cookies；重写响应 `Location` 中的 `:8084` → `:8083`，避免浏览器直连 webserver。
-- **`static_folder=None`**：禁用 Flask 内置 `/static` 路由，确保静态资源走反代（否则会被 Flask 自身 404 拦截）。
-- 响应用 `_clean()` 递归清洗 `datetime/ObjectId/Int64`，避免 Mongo 类型导致 JSON 序列化 500。
-
-## 5. 验证（当前已通过）
-
-| 验证项 | 命令 | 结果 |
-|--------|------|------|
-| BFF 健康 | `curl :8083/healthz` | `bff healthy`，`go_web=http://127.0.0.1:8084` |
-| UI 经 BFF | `curl -i :8083/` | `302 → /login?c_url=/`（同源 8083，浏览器跟随走 BFF） |
-| 静态资源 | `curl :8083/static/js/<runtime>.js` | `200 text/javascript` |
-| hzdz 主机视图 | `POST :8083/api/v3/hosts/search` | `count=10`，全部 `biz=[1]`（含原跨多业务的 host 7/8） |
-| 123 业务代理 | `POST :8083/api/v3/business/search` | 与直连 `:8084` 响应 **md5 一致**（透明反代） |
-
-## 6. 手动操作速查
-
-```bash
-# 单独启动 Python 后端（3000）
-cd /workspace/bk_cmdb_py/cmdb_server_py
-MONGODB_URI="mongodb://cc:cc@127.0.0.1:27017/cmdb?authSource=cmdb" MONGODB_DB=cmdb SKIP_LOGIN=true \
-  nohup python3.11 app.py > /tmp/cmdb_py_app.log 2>&1 &
-
-# 单独启动 BFF（8083，需 webserver 已在 8084）
-cd /workspace/bk_cmdb_py/cmdb_server_py
-GO_WEB_PORT=8084 BFF_PORT=8083 \
-  CMDB_MONGO_URI="mongodb://cc:cc@127.0.0.1:27017/cmdb?authSource=cmdb" HZ_VIEW_BIZ_ID=1 \
-  nohup python3.11 integrated_bff.py > /tmp/bff.log 2>&1 &
-
-# 浏览器打开集成入口
-open http://127.0.0.1:8083/        # admin / admin 登录
-```
-
-## 7. 隔离级别说明（对应此前架构讨论）
-
-- **L0（逻辑隔离）**：当前实现。hzdz 投影与 123 共享同一 Mongo 实例的 `cmdb` 库；Python 后端与 Go 栈均为该实例的读取方，`bk_cmdb` mock 库已删除。
-- **L2/L3（物理隔离）**：若将 `MONGODB_URI` 指向独立 Mongo 实例/部署，即为物理隔离；BFF 与独立 Python 后端不变。
-- **123 走 API（非裸 Mongo）**：BFF 对 123 通过 Go webserver REST 转发，schema 解耦、凭证最小化，符合联邦设计。
-
----
-
-## 8. 完整系统模式（BFF 无关，最小依赖）
-
-> 与第 1~7 节的「集成态（BFF + Go 全栈）」相互独立。本模式**不启动任何 Go 服务 / ZooKeeper / Redis / BFF**，
-> 仅由 `ui_server.py` 托管 prod_bin UI 并反向代理到 `app.py`，构成一个可独立运行的 CMDB 前端系统。
-
-### 8.1 端口与角色
+### 1.1 端口与角色
 
 | 角色 | 进程 | 端口 | 说明 |
 |------|------|------|------|
@@ -109,7 +26,7 @@ open http://127.0.0.1:8083/        # admin / admin 登录
            └── /api/v3/*        → 反代 app.py :3000（透传 bk_token Cookie）
 ```
 
-### 8.2 启动
+### 1.2 启动
 
 ```bash
 bash /workspace/bk_cmdb_py/start_ui_system.sh
@@ -118,7 +35,7 @@ bash /workspace/bk_cmdb_py/start_ui_system.sh
 
 > 脚本显式以 `SKIP_LOGIN=false` 启动 `app.py`（走真实登录），并以 `UI_PORT=8085` 启动 `ui_server.py`。
 
-### 8.3 鉴权设计（关键修复）
+### 1.3 鉴权设计（关键修复）
 
 | 问题 | 根因 | 修复 |
 |------|------|------|
@@ -127,7 +44,7 @@ bash /workspace/bk_cmdb_py/start_ui_system.sh
 
 配置对齐：`common.yaml` 中 `webServer.session.userInfo: admin:admin` 与 `authscheme: internal`；内置管理员即据此实现。
 
-### 8.4 验证（当前已通过）
+### 1.4 验证（当前已通过）
 
 | 验证项 | 命令 | 结果 |
 |--------|------|------|
@@ -141,7 +58,7 @@ bash /workspace/bk_cmdb_py/start_ui_system.sh
 | 拓扑（admin 可见） | `POST :8085/api/v3/find/topoinst_with_statistics/biz/1` | `result=true`，返回业务拓扑节点 |
 | 静态资源 | `curl :8085/static/js/app.<hash>.js` | `200` |
 
-### 8.5 资源目录「各模型实例数」404（关键修复）
+### 1.5 资源目录「各模型实例数」404（关键修复）
 
 > 现象：进入「资源」页（`#/resource/index`）后，控制台报 2 条 `Failed to load resource: 404` /
 > `Request failed with status code 404`，但模型树本身正常渲染。
@@ -153,9 +70,9 @@ bash /workspace/bk_cmdb_py/start_ui_system.sh
 | **修复** | 在 `ui_server.py` 新增 `GET/POST /object/count`（参考 web_server 实现，直接读 `cmdb` 实例统计计数）：<br>1. 入参取 `condition.obj_ids`（单次最多 20 个，与 bk-cmdb 一致）；<br>2. 通过 `cc_ObjectBase` 判断模型是否存在；存在则按 `bk_obj_id` 解析实例集合（内置特例 `biz→cc_ApplicationBase`、`set→cc_SetBase`、`module→cc_ModuleBase`、`host→cc_HostBase`、`process→cc_Process`、`bk_biz_set_obj→cc_BizSetBase`、`plat→cc_PlatBase`；通用对象 `cc_<obj_id>Base`）后 `count_documents`；<br>3. 响应严格携带 `bk_error_code:0`（前端拦截器仅认 `bk_error_code`），`data` 为计数数组；模型不存在才填 `error:"model not found"`。 |
 | **验证** | `POST :8085/object/count` 返回 `bk_error_code=0`、`data=[{bk_obj_id:"biz",inst_count:4,...},...]`；浏览器进资源页 **0 条控制台错误 / 0 个非 200 响应**，模型树显示各模型实例计数（业务 4、主机 10、业务集 1，网络类 0）。 |
 
-> 同类端点：前端还有约 30 个用 `window.API_HOST` 直拼的端点（`object/owner/`、`hosts/`、`user/list`、`insts/object/`、`organization/department`、`proxy/get/usermanage`、`collector/*`、`regular/*`、`importtemplate/*` 等）。它们同样落在 `:8085` 根路径、不带 `/api/v3`。其中仅「资源目录计数」在三个核心页面初始加载时触发；其余多在特定交互（导出/导入/用户管理/网络采集）时触发，当前未实现、会 404（多数带 `globalError:false` 不弹错误），属于已知范围外项，按需按 §8.5 同法在 `ui_server.py` 补路由即可。
+> 同类端点：前端还有约 30 个用 `window.API_HOST` 直拼的端点（`object/owner/`、`hosts/`、`user/list`、`insts/object/`、`organization/department`、`proxy/get/usermanage`、`collector/*`、`regular/*`、`importtemplate/*` 等）。它们同样落在 `:8085` 根路径、不带 `/api/v3`。其中仅「资源目录计数」在三个核心页面初始加载时触发；其余多在特定交互（导出/导入/用户管理/网络采集）时触发，当前未实现、会 404（多数带 `globalError:false` 不弹错误），属于已知范围外项，按需按 §1.5 同法在 `ui_server.py` 补路由即可。
 
-### 8.6 主机模型被错误显示为「平台 plat」（关键修复）
+### 1.6 主机模型被错误显示为「平台 plat」（关键修复）
 
 > 现象：资源目录 / 模型管理页中，主机模型（host）出现在「业务拓扑」下，而「主机管理」分类里只有「平台 plat」；与 bk-cmdb 默认布局不符。
 
@@ -165,7 +82,7 @@ bash /workspace/bk_cmdb_py/start_ui_system.sh
 | **修复** | 1. 更新 `cc_ObjectBase`：`host`/`process` 的 `bk_classification_id` → `bk_host_manage`；`plat` 的 `bk_classification_id` → `bk_host_manage`，`bk_obj_name` → `云区域`。<br>2. 修正 `app/routes/object_routes.py` 的 `find/topomodelmainline`：由按 `bk_classification_id` 过滤改为按 `bk_obj_id` 集合 `['biz','set','module','host','process','bk_biz_set_obj']` 查询，确保 host 即使被调整到 `bk_host_manage` 后仍出现在业务拓扑主线。 |
 | **验证** | `find/classificationobject` 返回：<br>• 主机管理：主机 (host)、进程 (process)、云区域 (plat)<br>• 业务拓扑：业务 (biz)、集群 (set)、模块 (module)、业务集 (bk_biz_set_obj)<br>• 网络：防火墙、负载均衡、路由器、交换机<br>`find/topomodelmainline` 仍返回 `biz→set→module→host`；业务拓扑页（`#/business/1/index`）主机列表正常显示 10 台主机；模型管理页主机模型不再显示为「平台」。 |
 
-### 8.7 业务拓扑节点主机计数显示为 0（关键修复）
+### 1.7 业务拓扑节点主机计数显示为 0（关键修复）
 
 > 现象：进入业务拓扑页（`#/business/1/index`），左侧拓扑树的节点「主机」计数全部显示为 **0**，而该业务实际挂载了主机（如业务 1=5 台、业务 3=6 台、业务 4=2 台）。
 
@@ -176,13 +93,13 @@ bash /workspace/bk_cmdb_py/start_ui_system.sh
 | **修复** | 将 `object_routes.py` 与 `admin_routes.py` 中**全部** `cc_HostModuleRelation` → `cc_ModuleHostConfig`（`replace_all`）：<br>1. `object_routes.py`：`find_topo_inst_with_statistics`（按 `bk_biz_id` 聚合 `bk_host_id` 计数）、`find_topoinstnode_host_serviceinst_count`（按 `condition` 逐节点计数）、其余拓扑/主机关系读取点；<br>2. `admin_routes.py`：主机列表详情读取主机↔模块关系处。<br>重启 `app.py` 后，计数走真实关系集合。 |
 | **验证** | • `POST :8085/api/v3/find/topoinst_with_statistics/biz/1` → `biz host_count=5`，`set 1 host_count=5`，`module 1 host_count=5`；<br>• `POST :8085/api/v3/find/topoinstnode/host_serviceinst_count/1` → 业务/集群节点均返回真实计数（5）；<br>• 无头浏览器（Playwright + 系统 Chromium）进入 `#/business/1/index`：左侧树真实节点「资源池/空闲机池/空闲机」均渲染 `host_count=5`。<br>• **残留观察（非缺陷）**：前端硬编码了一个虚拟默认集群节点 `set-0`（`bk_inst_id=0`，「空闲机池」），其 `host_count=0` 且模块子节点为 `null`——该虚拟节点无对应 DB 关系，0 是预期正确值；用户实际关心的真实拓扑节点计数已正确显示。 |
 
-> 关联：本修复与 §8.1 的「最小依赖（无 Go/ZooKeeper/Redis/BFF）模式」配套 —— 因已停掉 Go 全栈与 BFF（supervisord `cmdb-stack` 置 `STOPPED`、BFF 经 `fuser -k -9 8083/tcp` SIGKILL 释放），拓扑数据完全由 `cmdb_server_py` 直读 `cmdb` 实例提供，故计数修复只动 Python 后端即可，无需 Go 栈参与。
+> 关联：本修复与 §1.1 的「最小依赖（无 Go/ZooKeeper/Redis）模式」配套 —— 因已停掉 Go 全栈（supervisord `cmdb-stack` 置 `STOPPED`），拓扑数据完全由 `cmdb_server_py` 直读 `cmdb` 实例提供，故计数修复只动 Python 后端即可，无需 Go 栈参与。
 
-### 8.8 补齐根路径（无 /api/v3 前缀）端点（关键修复）
+### 1.8 补齐根路径（无 /api/v3 前缀）端点（关键修复）
 
 > 现象：前端部分 store 用 `window.API_HOST`（生产构建 = `window.location.origin + '/'`）**直拼**请求，落到 UI 服务 `:8085` 的**根路径**，而非 `/api/v3` 代理范围。这些端点在「最小依赖模式」下原会 404，导致资源/模型/主机等页的交互（导入、导出、用户/部门选择、正则校验、网络采集）报 404 或控制台错误。
 >
-> 范围：`prod_bin/ui` 的 minified JS 中实际出现的直拼端点清单见下表（在 §8.5 基础上补齐其余项）。
+> 范围：`prod_bin/ui` 的 minified JS 中实际出现的直拼端点清单见下表（在 §1.5 基础上补齐其余项）。
 
 **兜底策略**（`ui_server.py` 新增 `root_api_fallback` 兜底路由，注册在 `/object/count`、`/api/v3/<path>`、`/static` 等显式路由之后）：
 
@@ -196,7 +113,7 @@ bash /workspace/bk_cmdb_py/start_ui_system.sh
 | `hosts/search` | POST | 代理 → `/api/v3/hosts/search` | 真实主机列表（count=10） |
 | `hosts/search/web` | POST | 代理 → `/api/v3/hosts/search/web` | 真实 |
 | `biz/search/web` | POST | 代理 → `/api/v3/biz/search/web` | 真实业务搜索 |
-| `object/count` | POST | 本地读 Mongo（§8.5） | 资源目录模型计数 |
+| `object/count` | POST | 本地读 Mongo（§1.5） | 资源目录模型计数 |
 | `user/list` | GET | 代理 → `/api/v3/user/list`（`user_routes.py` 已补 GET） | 返回内置 `admin`（最小系统唯一账户）；前端原用 GET，原实现仅 POST 导致 405，已修正 |
 | `organization/department` | GET | 安全空响应 `data:[]` | 部门选择器（最小系统无组织数据） |
 | `importtemplate/<objId>`、`importtemplate/host` | GET | 安全空文件体（text/csv） | 模型/主机导入模板下载 |
@@ -209,13 +126,13 @@ bash /workspace/bk_cmdb_py/start_ui_system.sh
 | `collector/netdevice/{export,import}`、`collector/netproperty/{export,import}` | POST | 安全空文件体 / 安全空响应 | 网络采集设备/属性导入导出 |
 | `hosts/{export,import,update}`、`hosts/<id>/listen_ip_options` | POST/GET | 安全空响应 / 空文件体 | 主机导入导出（最小系统未覆盖，按需可改为代理真实接口） |
 
-> 说明：上表「下载/导出」类在最小系统中返回空文件体（不报错、不崩溃），如需真实文件可后续在 `app.py` 实现对应 `/api/v3` 接口并由兜底路由自动代理；「导入/校验/用户管理」类返回空成功，UI 不弹错。已验证：上述端点经 `:8085` 全部返回 **200**，且 `/api/v3/*`、`/static/*` 与拓扑计数（§8.7）不受影响。
+> 说明：上表「下载/导出」类在最小系统中返回空文件体（不报错、不崩溃），如需真实文件可后续在 `app.py` 实现对应 `/api/v3` 接口并由兜底路由自动代理；「导入/校验/用户管理」类返回空成功，UI 不弹错。已验证：上述端点经 `:8085` 全部返回 **200**，且 `/api/v3/*`、`/static/*` 与拓扑计数（§1.7）不受影响。
 
 **附：根因补充（user/list 405）** —— `app.py` 的 `user_routes.py` 原仅注册 `methods=['POST']`，而 bk-cmdb 前端以 `GET /user/list?fuzzy_lookups=...` 调用，代理后收到 405 被原样透传。修复：将 `/user/list` 改为 `methods=['GET','POST']`，并在 `conn.users` 集合不存在/为空时以内置超级管理员 `admin` 作为唯一账户兜底（返回 `{count, info:[{bk_username,username,bk_role,role,language}]}`），使成员选择器可用。
 
 ---
 
-### 8.9 业务拓扑空闲机池重复 + 主机搜索条件/分页 + 主机详情（关键修复，对应 Request C）
+### 1.9 业务拓扑空闲机池重复 + 主机搜索条件/分页 + 主机详情（关键修复，对应 Request C）
 
 > 三项均按「先核对原 bk-cmdb v3.10.50 源码语义，再复刻」的原则实现（sub-item 3）。
 
@@ -275,7 +192,7 @@ bash /workspace/bk_cmdb_py/start_ui_system.sh
 
 ---
 
-### 8.10 资源池主机详情页「完全无数据」修复（对应用户本次问题）
+### 1.10 资源池主机详情页「完全无数据」修复（对应用户本次问题）
 
 > 现象：`/#/resource/host/2?from=resource` 主机详情页头部显示 `10.0.0.11` 但**属性面板空白**，「所属拓扑」为空。
 >
@@ -378,7 +295,7 @@ POST /find/topopath/biz/1
 
 ---
 
-### 8.11 资源「实例」页（bk_switch 等通用/网络对象）无数据（关键修复）
+### 1.11 资源「实例」页（bk_switch 等通用/网络对象）无数据（关键修复）
 
 > 现象：`#/resource/instance/bk_switch` 交换机实例列表为空；`POST /count/instances/object/bk_switch` 与 `POST /search/instances/object/bk_switch` 均返回 `count:0`。
 >
@@ -433,7 +350,7 @@ def get_inst_collection_name(obj_id):
 
 > 注：为验证端到端读写，已在 `cc_ObjectBase_0_pub_bk_switch` 写入 2 条**样本数据**（核心交换机-01/02，厂商 H3C，型号 S6800）。若不需要可删除：`db.cc_ObjectBase_0_pub_bk_switch.delete_many({})`。这进一步证实「无数据」此前是集合名 Bug 所致——修复后即使真实数据也能正确读写。
 
-### 8.12 从 Go 预编译二进制重跑 init seed 并补充业务/主机（对应 Request D）
+### 1.12 从 Go 预编译二进制重跑 init seed 并补充业务/主机（对应 Request D）
 
 **目标**：Python 后端直接读 Mongo 的 `cmdb` 库，而这份数据必须由 bk-cmdb 的 Go 初始化产生。本节能从「已构建好的 Go 二进制」出发，完整重跑 init/seed，并补 1 个模拟业务 + 12 台主机。
 
@@ -515,11 +432,11 @@ mongorestore --uri="mongodb://cc:cc@127.0.0.1:27017/cmdb?replicaSet=rs0&authSour
 
 ---
 
-## 15. Python migrate seed 对齐 Go 官方种子（v3.10.50）
+## 2. Python migrate seed 对齐 Go 官方种子（v3.10.50）
 
 **背景**：用户反馈「migrate seed 数据不太对」。根因是 Python migrate 的模型 ID 命名与 Go 官方种子不一致，而编译版 Vue UI 发送的是 Go 的 ID，导致字段错位。
 
-### 15.1 Go 官方方案执行（基线）
+### 2.1 Go 官方方案执行（基线）
 
 ```bash
 cd prod_bin/deploy
@@ -528,7 +445,7 @@ bash init_cmdb_seed.sh run --clear     # 清空并走 cmdb_adminserver 内置 mi
 
 结果：`cmdb` 库产出 **78 个集合**的权威基线（`cc_ObjAttDes=145`、`cc_ApplicationBase=2` 等）。
 
-### 15.2 差异根因（Python 旧实现 vs Go）
+### 2.2 差异根因（Python 旧实现 vs Go）
 
 | 维度 | Python 旧实现（错误） | Go 官方（正确） |
 |------|----------------------|----------------|
@@ -542,7 +459,7 @@ bash init_cmdb_seed.sh run --clear     # 清空并走 cmdb_adminserver 内置 mi
 
 > 完整差异见 `diff_go_vs_py.md`；Go 权威数据见 `go_attr_full.json` / `go_model_ref.json` / `go_default_data.json`。
 
-### 15.3 迭代内容（一次到位）
+### 2.3 迭代内容（一次到位）
 
 源文件改造（均在 `cmdb_server_py/migrate/`）：
 
@@ -557,7 +474,7 @@ bash init_cmdb_seed.sh run --clear     # 清空并走 cmdb_adminserver 内置 mi
 
 **ID 生成器关键点**：Flask 的 `next_sequence` 依赖 `cc_idgenerator`（`_id`=集合名、`SequenceID` 自增）。`IDGeneratorMigrate` 按各集合**实际最大 id** 动态计算 `SequenceID`（如 `cc_ObjAttDes=159`、`cc_ServiceCategory=42`），避免新建对象与已种子 id 冲突。服务分类采用非连续 id（最大 42），故**不能**直接套用 Go 的连续值 20。
 
-### 15.4 验证（Python → 对齐 Go）
+### 2.4 验证（Python → 对齐 Go）
 
 清空临时库 `cmdb_pycmp` 后执行 `python3.11 -m migrate.cli --all`，逐项对比 `cmdb`（Go）：
 
@@ -577,7 +494,7 @@ bash init_cmdb_seed.sh run --clear     # 清空并走 cmdb_adminserver 内置 mi
 
 12 个集合计数全部一致、无单方缺失；`biz` 属性 ID 集合与 Go 完全相同。
 
-### 15.5 重新播种运行库（可选）
+### 2.5 重新播种运行库（可选）
 
 若需让运行中的 `cmdb` 改用 Python migrate 作为种子源（与 Go 数据等价）：
 
@@ -594,12 +511,12 @@ python3.11 seed_extra.py              # 补充 mock 业务 + 主机（如需）
 
 ---
 
-## 16. 补充 Python migrate mock 数据（seed_extra.py）
+## 3. 补充 Python migrate mock 数据（seed_extra.py）
 
 > 目的：在 Go 已种子的运行库 `cmdb` 之上，补充 1 个 mock 业务 + 12 台主机，供前端拓扑/资源/主机视图演示读取。
 > 脚本：`cmdb_server_py/seed_extra.py`（幂等；默认连接 `mongodb://cc:cc@127.0.0.1:27017/cmdb?authSource=cmdb`，DB=`cmdb`）。
 
-### 16.1 前置依赖（运行前已具备）
+### 3.1 前置依赖（运行前已具备）
 
 | 前置集合 | 运行前计数 | 说明 |
 |---|---|---|
@@ -610,7 +527,7 @@ python3.11 seed_extra.py              # 补充 mock 业务 + 主机（如需）
 | `cc_HostBase` | 0 | 目标表，本次写入 12 条 |
 | `mock-biz-001` 是否已存在 | 否 | 走「全新创建」分支 |
 
-### 16.2 执行命令
+### 3.2 执行命令
 
 ```bash
 cd /workspace/bk_cmdb_py/cmdb_server_py
@@ -619,7 +536,7 @@ python3.11 seed_extra.py
 
 可选环境变量覆盖：`SEED_BIZ_NAME` / `SEED_HOST_COUNT` / `SEED_IP_PREFIX` / `SEED_SET_NAME` / `SEED_MODULE_NAME`。
 
-### 16.3 执行结果（2026-07-14）
+### 3.3 执行结果（2026-07-14）
 
 | 对象 | 关键 ID | 名称 | 归属 |
 |---|---|---|---|
@@ -628,7 +545,7 @@ python3.11 seed_extra.py
 | 模块 | `bk_module_id=7` | `mock-module-001` | set=3 |
 | 主机 | `bk_host_id=1..12` | IP `10.10.10.101..112` | `bk_cloud_id=0` |
 
-### 16.4 写入后计数与一致性校验
+### 3.4 写入后计数与一致性校验
 
 | 集合 | 运行前 | 运行后 | 校验 |
 |---|---|---|---|
@@ -645,9 +562,9 @@ python3.11 seed_extra.py
 
 ---
 
-## 17. 主线节点删除接口实现（`DELETE /delete/topomodelmainline/object/{bk_obj_id}`）
+## 4. 主线节点删除接口实现（`DELETE /delete/topomodelmainline/object/{bk_obj_id}`）
 
-### 17.1 背景与根因
+### 4.1 背景与根因
 
 模型详情页顶部「删除」按钮在 `isMainLineModel` 为真时走**专用删除通道**（前端 `objectMainLineModule/deleteMainlineObject`
 → `DELETE /api/v3/delete/topomodelmainline/object/{bk_obj_id}`），而模型详情「模型关联」tab 里的删除对 `bk_mainline`
@@ -658,7 +575,7 @@ python3.11 seed_extra.py
 导致前端点击「删除」命中 404 → 报错「api可能没实现」。本 § 补全该接口，逻辑严格对齐 Go `DeleteMainLineObject →
 DeleteMainlineAssociation`。
 
-### 17.2 Go 原逻辑对照（`DeleteMainlineAssociation`）
+### 4.2 Go 原逻辑对照（`DeleteMainlineAssociation`）
 
 | 步骤 | Go 行为 | 守门条件 |
 |---|---|---|
@@ -670,7 +587,7 @@ DeleteMainlineAssociation`。
 
 > 关键顺序：**先实例重挂/删除（步骤1），再元数据删除+重链（步骤2-4）**。Python 实现保持同一顺序。
 
-### 17.3 Python 实现要点
+### 4.3 Python 实现要点
 
 **路由层**（`app/routes/object_routes.py`，`@object_bp.route('/delete/topomodelmainline/object/<bk_obj_id>', methods=['DELETE'])`）
 
@@ -716,7 +633,7 @@ def delete_topo_model_mainline(bk_obj_id):
 导入已在 `app/routes/object_routes.py:6` 补齐：
 `from app.core.model import ModelError, ensure_model_default_attributes, get_mainline_neighbors, delete_mainline_object`。
 
-### 17.4 伴随修复：create-relink 的 `ispre` 数据 bug
+### 4.4 伴随修复：create-relink 的 `ispre` 数据 bug
 
 此前 `POST /create/topomodelmainline` 第 3 步重链时，只更新了 `bk_asst_obj_id` / `bk_obj_asst_id`，
 **漏置 `ispre=False`**，导致 `set_bk_mainline_appsys` 仍带 `ispre=True`。Go 在重链时显式 `IsPre=false`，
@@ -737,7 +654,7 @@ obj_asst_coll.update_one(
 存量脏数据归一化：`cc_ObjAsst.update_many({"bk_obj_asst_id":"set_bk_mainline_appsys"}, {"$set":{"ispre":False}})`（1 条）。
 校验：`module_bk_mainline_set`、`host_bk_mainline_module` 仍正确保留 `ispre=True`（真实预定义内置关联，不应被删）。
 
-### 17.5 验证结果（删除 `appsys`，链路 `biz → appsys → set → module → host`）
+### 4.5 验证结果（删除 `appsys`，链路 `biz → appsys → set → module → host`）
 
 删除前备份已存于 `/workspace/bk_cmdb_py/backup_appsys_delete/`（cc_ObjAsst / cc_ObjDes /
 cc_ObjectBase_0_pub_appsys / cc_SetBase / cc_ApplicationBase 的 JSON dump），可回滚。
@@ -759,7 +676,7 @@ cc_ObjectBase_0_pub_appsys / cc_SetBase / cc_ApplicationBase 的 JSON dump），
 | 不存在 `nope` | 404 | 模型不存在 |
 | 非主线 `bk_switch` | 400 | 模型不是主线模型，无主线关联可删除 |
 
-### 17.6 端到端使用
+### 4.6 端到端使用
 
 - 前端：模型详情页（如 `appsys`）→ 顶部「删除」→ 走 `isMainLineModel` 专用通道 → 调用本接口。
 - 后端需重启 `app.py:3000` 使新路由生效（增量代码已写入，未重启则旧进程无此路由）。
@@ -768,15 +685,15 @@ cc_ObjectBase_0_pub_appsys / cc_SetBase / cc_ApplicationBase 的 JSON dump），
 
 ---
 
-## 18. 业务拓扑读取须遍历动态主线链（修复「新增主线层后业务树无变化」）
+## 5. 业务拓扑读取须遍历动态主线链（修复「新增主线层后业务树无变化」）
 
-### 18.1 现象
+### 5.1 现象
 
 模型-编辑拓扑 新增 `appsys1_bk_mainline_biz` 后，业务拓扑（`业务拓扑` 页）**无任何层级变化**：
 - 存量 set 经 `_propagate_mainline_inst` 已 reparent 到 appsys1 实例下（写入侧正确）；
 - 但业务拓扑读取接口**不渲染** appsys1 层级，sets 仍显示直接挂在业务下。
 
-### 18.2 根因（READ 侧写死主线链，与 Go 相反）
+### 5.2 根因（READ 侧写死主线链，与 Go 相反）
 
 `object_routes.py` 的 `find_business_topo_inst`(`/find/topoinst/biz/<id>`) 与
 `find_topo_inst_with_statistics`(`/find/topoinst_with_statistics/biz/<id>`) 把主线链**硬编码为
@@ -792,7 +709,7 @@ biz→set→module**，按 `bk_biz_id`/`bk_set_id` 直接查、完全忽略 `bk_
 > （`return make_response()`），不落库。因此主线关联须由 `POST /create/topomodelmainline`（`_propagate_mainline_inst`
 > 在此触发，创建 appsys1 实例并 reparent 存量 set）创建，不能依赖编辑拓扑页的自动保存。
 
-### 18.3 修复（新增动态遍历，对齐 Go buildTopoInstRst）
+### 5.3 修复（新增动态遍历，对齐 Go buildTopoInstRst）
 
 `object_routes.py` 新增共享辅助函数：
 
@@ -809,7 +726,7 @@ biz→set→module**，按 `bk_biz_id`/`bk_set_id` 直接查、完全忽略 `bk_
 
 遍历用**全量 `node_by_id` 字典跨级查找父节点**（不能只用当前层 `parent_nodes`，否则空闲机池 parent=biz 在第 set 层查到后找不到 biz 节点而丢失——初版即此 bug）。
 
-### 18.4 验证结果
+### 5.4 验证结果
 
 重启 `app.py:3000` 后，业务拓扑正确渲染：
 

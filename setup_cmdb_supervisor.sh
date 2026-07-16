@@ -5,7 +5,7 @@
 # 将「CMDB 完整系统」（最小依赖：仅 MongoDB 4.4.29）的三个服务注册到
 # PID 1 的 supervisord，实现沙箱休眠/恢复后自动拉起，并一键产出预览 URL。
 #
-# 适用模式：完整系统 / BFF 无关（不拉起任何 Go 服务、ZooKeeper、Redis）。
+# 适用模式：完整系统（最小依赖，不拉起任何 Go 服务、ZooKeeper、Redis）。
 # 覆盖服务：
 #   - MongoDB 4.4.29 副本集 rs0（:27017）
 #   - 后端 app.py（Flask，:3000）
@@ -25,7 +25,7 @@ SUP_CONF=/.PlnPyKFp4CRfFtgC1/supervisord-conf/supervisord.conf
 SUP_CONF_DIR=/usr/local/share/supervisor
 BIN_DIR=/usr/local/bin
 
-BFF_DIR=/workspace/bk_cmdb_py/cmdb_server_py
+BACKEND_DIR=/workspace/bk_cmdb_py/cmdb_server_py
 PROD_UI=/workspace/bk_cmdb_py/prod_bin/ui
 MONGO_DATA=/data/db
 MONGO_LOGDIR=/var/log/mongodb
@@ -40,7 +40,7 @@ log(){ echo "[$(date '+%F %T')] $*"; }
 # ---------- 1. 前置检查 ----------
 [ -x "$MONGO_BIN" ] || { log "ERROR: 未找到 mongod ($MONGO_BIN)"; exit 1; }
 command -v "$SUP_BIN" >/dev/null 2>&1 || { log "ERROR: 未找到 supervisord ($SUP_BIN)"; exit 1; }
-[ -d "$BFF_DIR" ] || { log "ERROR: 未找到后端目录 ($BFF_DIR)"; exit 1; }
+[ -d "$BACKEND_DIR" ] || { log "ERROR: 未找到后端目录 ($BACKEND_DIR)"; exit 1; }
 [ -d "$PROD_UI" ] || { log "ERROR: 未找到前端静态目录 ($PROD_UI)"; exit 1; }
 
 mkdir -p "$SUP_CONF_DIR" "$BIN_DIR" "$MONGO_DATA" "$MONGO_LOGDIR"
@@ -127,7 +127,7 @@ EOF
 cat > "$SUP_CONF_DIR/cmdb-app.conf" <<EOF
 [program:cmdb-app]
 command=$BIN_DIR/cmdb_start_app.sh
-directory=$BFF_DIR
+directory=$BACKEND_DIR
 autostart=true
 autorestart=true
 startsecs=5
@@ -144,7 +144,7 @@ EOF
 cat > "$SUP_CONF_DIR/cmdb-ui.conf" <<EOF
 [program:cmdb-ui]
 command=$BIN_DIR/cmdb_start_ui.sh
-directory=$BFF_DIR
+directory=$BACKEND_DIR
 autostart=true
 autorestart=true
 startsecs=5

@@ -1,7 +1,7 @@
 """动态主机分组（Dynamic Group / Custom Query）接口
 
 对齐 Go 侧 ``scene_server/host_server/service/dynamic_grouping.go`` + ``logics/dynamic_grouping.go``，
-为前端 ``views/dynamic-group``（store: ``dynamic-group.js``）提供 BFF 无关、仅依赖 MongoDB 的实现。
+为前端 ``views/dynamic-group``（store: ``dynamic-group.js``）提供仅依赖 MongoDB 的实现。
 
 前端接口（均挂 /api/v3 前缀）：
   POST   /api/v3/dynamicgroup                 -> create（新建）

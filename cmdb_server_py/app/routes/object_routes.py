@@ -438,11 +438,16 @@ def build_mainline_inst_tree(conn, supplier, bk_biz_id, with_idle_pool=True):
     biz_id = biz.get("bk_biz_id")
     biz_node = _make_topo_node(biz, "biz", obj_name_map=obj_name_map)
 
-    # node_by_id: 全量节点字典（跨级查找父节点用）。
-    # 必须跨级：空闲机池(default=1) 的 bk_parent_id 指向 biz，而 biz 已不在「当前层」字典中，
-    # 若只用当前层 parent_nodes 会丢失它（见 Go buildTopoInstRst 的 idle pool 直接挂 biz 逻辑）。
-    node_by_id = {biz_id: biz_node}
-    parent_nodes = {biz_id: biz_node}   # 仅用于驱动下一层的父实例 id 列表
+    # 每层节点字典：level_nodes[层级序号] = {该层实例 id: 节点}。
+    # 关键修复：用「按层隔离」的字典替代原先全局共享的 node_by_id。bk-cmdb 各主线层级的
+    # 实例 id 各自独立编号（bk_biz_id / bk_inst_id / bk_set_id 都从 1 起），数值会跨层碰撞
+    # （如 biz_id=3、appsys 实例 id=3、set_id=3 同为 3）。若用全局字典按裸 id 存节点，
+    # 处理到下一层、乃至同一层下一个兄弟时会被覆盖，导致兄弟节点 A、B（同父 id=3）中，
+    # B 误把刚刚写入字典的 A 当作父节点挂成父子
+    # —— 正是「TG运营 被挂到 ECIF集群 下」的根因。
+    # 改为：第 i 层子节点的父必在第 i-1 层，直接在本层父字典 level_nodes[i-1] 中查；
+    # 仅 set 层的空闲/故障/待回收机池（default∈{1,2,3}，其父为业务 biz）特例跨级查 level_nodes[0]。
+    level_nodes = {0: {biz_id: biz_node}}
     for i in range(1, len(chain)):
         obj = chain[i]
         if obj == "host":
@@ -450,10 +455,11 @@ def build_mainline_inst_tree(conn, supplier, bk_biz_id, with_idle_pool=True):
         child_coll = conn[get_inst_collection_name(obj)]
         child_id_field = get_inst_id_field(obj)
         name_field = get_inst_name_field(obj)
-        parent_ids = list(parent_nodes.keys())
-        # Go 怪异逻辑：set 层额外纳入 biz id，捕获空闲机池(default=1, parent=biz)
+        parent_ids = list(level_nodes[i - 1].keys())
+        # 空闲/故障机池(default∈{1,2,3}) 的 bk_parent_id 指向 biz，跨级纳入业务 id，
+        # 使这些池子直接挂到业务节点下（对齐 Go buildTopoInstRst 的 idle pool 逻辑）。
         if obj == "set":
-            parent_ids = parent_ids + [biz_id]
+            parent_ids = parent_ids + list(level_nodes[0].keys())
         filt = {
             "bk_parent_id": {"$in": parent_ids},
             "bk_supplier_account": supplier,
@@ -466,18 +472,34 @@ def build_mainline_inst_tree(conn, supplier, bk_biz_id, with_idle_pool=True):
         children.sort(key=lambda x: (
             0 if x.get("default", x.get("bk_default", 0)) in (1, 2, 3) else 1,
             x.get(name_field, "") or ""))
-        new_parent_nodes = {}
+        new_level = {}
         for c in children:
             pid = c.get("bk_parent_id")
-            pnode = node_by_id.get(pid)   # 跨级查找父节点（含 biz）
+            cid = c.get(child_id_field)
+            if cid is None:
+                continue
+            try:
+                dflt = int(str(c.get("default", c.get("bk_default", 0)) or 0))
+            except (TypeError, ValueError):
+                dflt = 0
+            # 空闲/故障/待回收机池(default∈{1,2,3})：bk_parent_id 指向业务，父必为业务(level 0)，
+            # 优先在 level 0 解析——其 bk_parent_id 与上层自定义主线实例 id 会数值碰撞，须避开。
+            # 其余正常主线层级：父在上一层 (i-1)。
+            if obj == "set" and dflt in (1, 2, 3):
+                pnode = level_nodes.get(0, {}).get(pid)
+                if pnode is None:
+                    pnode = level_nodes.get(i - 1, {}).get(pid)
+            else:
+                pnode = level_nodes.get(i - 1, {}).get(pid)
+                if pnode is None and obj == "set":
+                    pnode = level_nodes.get(0, {}).get(pid)
             if pnode is None:
                 continue
             node = _make_topo_node(c, obj, obj_name_map=obj_name_map,
                                   name_field=name_field, id_field=child_id_field)
             pnode["child"].append(node)
-            new_parent_nodes[c.get(child_id_field)] = node
-            node_by_id[c.get(child_id_field)] = node
-        parent_nodes = new_parent_nodes
+            new_level[cid] = node
+        level_nodes[i] = new_level
     return [biz_node]
 
 
@@ -1524,55 +1546,19 @@ def topo_internal_with_statistics_new(supplier_account, bk_biz_id):
         # 空闲机池模块的 default 值映射（按名称兜底，因部分数据缺失 default 字段）
         idle_module_default = {"空闲机": 1, "故障机": 2, "待回收": 3}
 
-        # 定位空闲机池集群：空闲机池是「资源池」(bk_biz_id=1, default=1) 的内置集群，
-        # 与“当前业务”无关。bk-cmdb 的「转移到空闲机」对话框会按主机所在业务来请求本接口
-        # （bk_biz_id 可能是任意业务而非资源池），若只在请求业务内查找，非资源池业务会查不到
-        # 空闲机池，从而退化成 bk_set_id=0 / module=[] 的空节点 —— 前端便把它渲染成普通集群图标
-        # 且因无可选模块而“无法编辑”。故：请求业务内找不到时回退到资源池业务，
-        # 始终返回真实的空闲机池（含其模块），并用空闲机池自身的 bk_biz_id 查模块/主机。
-        res_pool = conn.cc_ApplicationBase.find_one(
-            {"default": 1}, {"bk_biz_id": 1, "_id": 0})
-        res_biz_id = res_pool.get("bk_biz_id") if res_pool else 1
-        candidate_biz_ids = [bk_biz_id]
-        if res_biz_id is not None and res_biz_id != bk_biz_id:
-            candidate_biz_ids.append(res_biz_id)
-
-        idle_set = None
-        for _biz in candidate_biz_ids:
-            idle_set = conn.cc_SetBase.find_one({
-                "bk_biz_id": _biz,
-                "bk_data_status": {"$ne": "disabled"},
-                "$or": [{"default": 1}, {"bk_default": 1}, {"bk_set_name": "空闲机池"}]
-            })
-            if idle_set:
-                break
-        if not idle_set:
-            idle_set = conn.cc_SetBase.find_one({
-                "bk_biz_id": res_biz_id,
-                "bk_data_status": {"$ne": "disabled"},
-                "bk_set_name": {"$regex": "空闲机池"}
-            })
-
-        if not idle_set:
-            # 退化：仍返回结构合法的空闲机池节点，避免前端解构报错
-            return make_response(data={
-                "bk_set_id": 0,
-                "bk_set_name": "空闲机池",
-                "default": 1,
-                "module": []
-            })
-
+        # 空闲机池是【目标业务自身】的内置集群：bk-cmdb 的 create_business 会为每个业务生成
+        # 空闲机池（default=1）及其 空闲机/故障机/待回收 三个内置模块。本仓库部分业务经非标准
+        # 路径创建可能缺失，此前此处错误地回退到「资源池」的空闲机池，导致对话框把资源池的
+        # 空闲机池显示成目标业务的（集群类型误显）。现改为：为目标业务按需创建专属空闲机池，
+        # 使 topo/internal 始终返回请求业务自身的空闲机池。
+        idle_set, internal_modules = _ensure_business_idle_pool(conn, bk_biz_id)
         idle_set_id = idle_set.get("bk_set_id")
-        idle_biz_id = idle_set.get("bk_biz_id")
+        idle_biz_id = bk_biz_id
         host_relations = list(conn.cc_ModuleHostConfig.find({
             "bk_biz_id": idle_biz_id, "bk_set_id": idle_set_id
         }))
 
-        modules = list(conn.cc_ModuleBase.find({
-            "bk_biz_id": idle_biz_id,
-            "bk_set_id": idle_set_id,
-            "bk_data_status": {"$ne": "disabled"}
-        }))
+        modules = internal_modules
 
         module_list = []
         for m in modules:
@@ -2918,6 +2904,75 @@ def _ensure_idle_module(conn, biz_id):
     return new_id, set_id
 
 
+def _ensure_business_idle_pool(conn, biz_id):
+    """确保某业务存在专属空闲机池（default=1 集群）及 空闲机/故障机/待回收 三个内置模块。
+
+    bk-cmdb 的 create_business 会为每个业务生成空闲机池与内置模块；本仓库部分业务（经非标准
+    路径创建）可能缺失，导致 topo/internal 接口越界回退到资源池的空闲机池（集群类型显示错误）。
+    此处按需为该业务创建专属空闲机池，使「转移到其他业务」对话框展示正确的目标业务空闲机池。
+    返回 (idle_set_doc, [module_doc, ...])。
+    """
+    idle_set = conn.cc_SetBase.find_one({
+        "bk_biz_id": biz_id,
+        "bk_data_status": {"$ne": "disabled"},
+        "$or": [{"default": 1}, {"bk_default": 1}, {"bk_set_name": "空闲机池"}]
+    })
+    if not idle_set:
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        set_id = next_sequence(conn, "cc_SetBase")
+        idle_set = {
+            "bk_set_id": set_id,
+            "bk_set_name": "空闲机池",
+            "bk_biz_id": biz_id,
+            "bk_supplier_account": "0",
+            "bk_parent_id": biz_id,
+            "bk_parent_obj": "biz",
+            "default": 1,
+            "bk_service_status": "1",
+            "bk_set_env": "3",
+            "description": "",
+            "bk_data_status": "enabled",
+            "create_time": now,
+            "last_time": now,
+        }
+        conn.cc_SetBase.insert_one(idle_set)
+    else:
+        set_id = idle_set.get("bk_set_id")
+
+    builtin = [("空闲机", 1), ("故障机", 2), ("待回收", 3)]
+    existing = {m.get("bk_module_name"): m for m in conn.cc_ModuleBase.find(
+        {"bk_biz_id": biz_id, "bk_set_id": set_id})}
+    modules = []
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    for mname, dflt in builtin:
+        if mname in existing:
+            modules.append(existing[mname])
+            continue
+        mid = next_sequence(conn, "cc_ModuleBase")
+        mod = {
+            "bk_module_id": mid,
+            "bk_module_name": mname,
+            "bk_biz_id": biz_id,
+            "bk_set_id": set_id,
+            "bk_parent_id": set_id,
+            "bk_parent_obj": "set",
+            "default": dflt,
+            "bk_service_category_id": 0,
+            "bk_service_template_id": 0,
+            "set_template_id": 0,
+            "bk_module_type": str(dflt),
+            "operator": "",
+            "bk_bak_operator": "",
+            "bk_supplier_account": "0",
+            "bk_data_status": "enabled",
+            "create_time": now,
+            "last_time": now,
+        }
+        conn.cc_ModuleBase.insert_one(mod)
+        modules.append(mod)
+    return idle_set, modules
+
+
 @object_bp.route('/hosts/modules/idle', methods=['POST'])
 def move_host_to_idle_module():
     """分配到业务空闲机池（对齐 Go: POST /hosts/modules/idle -> MoveHost2IdleModule）。
@@ -3024,6 +3079,181 @@ def assign_host_to_app():
                 moved += 1
 
         return make_response(data={"bk_module_id": target_module_id, "moved": moved})
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return make_response(result=False, code=500, message=str(e))
+
+
+@object_bp.route('/hosts/resource/cross/biz', methods=['POST'])
+def transfer_host_to_other_biz():
+    """转移主机到其他业务（对齐 Go: POST /hosts/resource/cross/biz -> TransferHostToOtherBizModule）。
+
+    前端 hostRelation/transferHostToOtherBizModule 派发，请求体：
+        { resource_hosts: [{src_bk_biz_id, src_bk_host_ids:[...]}],
+          dst_bk_biz_id: <目标业务ID>, dst_bk_module_id: <目标模块ID> }
+    其中 dst_bk_module_id 来自弹窗选中的目标模块实例（bk_inst_id），dst_bk_biz_id 为目标业务。
+
+    Go 语义（host_server TransferHostToOtherBizModule -> TransferToAnotherBusiness）：
+      1. 目标模块必须归属 dst_bk_biz_id，否则拒绝；
+      2. 跨业务转移：删除这些主机在【原业务】下的全部模块关系（彻底离开源业务，
+         含可能的空闲机/故障机内置模块），再在目标业务写入 dst_bk_module_id 关系；
+      3. 本仓库主机业务归属由 cc_ModuleHostConfig.bk_biz_id 决定（cc_HostBase 无 bk_biz_id），
+         故只维护关系表即可，无需改主机主表。
+    """
+    try:
+        conn = get_db_connection()
+        if conn is None:
+            return make_response(result=False, code=500, message="数据库连接失败")
+
+        req = request.get_json() or {}
+        resource_hosts = req.get("resource_hosts") or []
+        dst_biz = int(req.get("dst_bk_biz_id") or 0)
+        dst_module = int(req.get("dst_bk_module_id") or 0)
+
+        if not dst_biz:
+            return make_response(result=False, code=400, message="缺少 dst_bk_biz_id（目标业务）")
+        if not dst_module:
+            return make_response(result=False, code=400, message="缺少 dst_bk_module_id（目标模块）")
+
+        # 解析待转移主机，支持两种形态：
+        #   a) [{src_bk_biz_id, src_bk_host_ids:[...]}]（前端实际形态）
+        #   b) 扁平 [hid, ...]（兼容）
+        host_list = []
+        for item in (resource_hosts if isinstance(resource_hosts, list) else []):
+            if isinstance(item, dict):
+                sb = int(item.get("src_bk_biz_id") or 0)
+                ids = item.get("src_bk_host_ids") or item.get("bk_host_ids") \
+                    or item.get("bk_host_id") or []
+                if isinstance(ids, int):
+                    ids = [ids]
+                for hid in ids:
+                    try:
+                        hid = int(hid)
+                    except (TypeError, ValueError):
+                        continue
+                    host_list.append((sb, hid))
+            elif isinstance(item, int):
+                host_list.append((0, item))
+
+        if not host_list:
+            return make_response(result=False, code=400, message="缺少 resource_hosts（待转移主机）")
+
+        # 校验目标模块归属目标业务
+        mod = conn.cc_ModuleBase.find_one({"bk_module_id": dst_module})
+        if not mod or int(mod.get("bk_biz_id") or 0) != dst_biz:
+            return make_response(result=False, code=400,
+                                 message="目标模块不存在或不属于目标业务 dst_bk_biz_id")
+        target_set_id = mod.get("bk_set_id")
+
+        # 目标业务是否存在（资源池业务 default=1 不允许直接转入，那是「归还主机池」语义）
+        rp = conn.cc_ApplicationBase.find_one({"default": 1}) or \
+            conn.cc_ApplicationBase.find_one({"bk_biz_id": {"$ne": None}})
+        owner_app = int(rp.get("bk_biz_id")) if rp else 0
+        if dst_biz == owner_app:
+            return make_response(result=False, code=400,
+                                 message="目标业务为资源池，请使用「归还主机池」操作")
+        if not conn.cc_ApplicationBase.find_one({"bk_biz_id": dst_biz}):
+            return make_response(result=False, code=400, message="目标业务不存在")
+
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        moved = 0
+        for sb, hid in host_list:
+            hid = int(hid)
+            # 跨业务转移：删除该主机在【源业务】下的全部模块关系；
+            # 扁平形态（无 src_bk_biz_id）则删除该主机全部关系，确保彻底离开原业务。
+            del_filter = {"bk_host_id": hid}
+            if sb:
+                del_filter["bk_biz_id"] = sb
+            conn.cc_ModuleHostConfig.delete_many(del_filter)
+            # 在目标业务写入目标模块关系（幂等 upsert）
+            conn.cc_ModuleHostConfig.update_one(
+                {"bk_host_id": hid, "bk_module_id": dst_module, "bk_biz_id": dst_biz},
+                {"$set": {"bk_set_id": target_set_id, "bk_biz_id": dst_biz,
+                          "bk_module_id": dst_module, "bk_supplier_account": "0",
+                          "last_time": now}},
+                upsert=True)
+            moved += 1
+
+        return make_response(data={"bk_module_id": dst_module, "moved": moved})
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return make_response(result=False, code=500, message=str(e))
+
+
+@object_bp.route('/hosts/modules/across/biz', methods=['POST'])
+def transfer_host_across_biz():
+    """跨业务转移主机（对齐 Go: POST /hosts/modules/across/biz -> TransferHostAcrossBusiness）。
+
+    这是「转移到其他业务」对话框的真实提交端点（business-topology/host/host-list.vue
+    的 moveHostToOtherBusiness 派发），请求体：
+        { src_bk_biz_id, dst_bk_biz_id, bk_host_id: [...], bk_module_id }
+    其中 bk_module_id 为目标业务 dst_bk_biz_id 下的内置模块（空闲机/故障机/待回收，default∈{1,2,3}）。
+
+    Go 语义（TransferHostAcrossBusiness -> TransferToAnotherBusiness）：
+      1. 目标模块必须归属 dst_bk_biz_id，否则拒绝；
+      2. 跨业务转移：删除这些主机在【源业务】下的全部模块关系，再在目标业务写入 bk_module_id 关系；
+      3. 本仓库主机业务归属由 cc_ModuleHostConfig.bk_biz_id 决定（cc_HostBase 无 bk_biz_id），
+         故只维护关系表即可。
+    """
+    try:
+        conn = get_db_connection()
+        if conn is None:
+            return make_response(result=False, code=500, message="数据库连接失败")
+
+        req = request.get_json() or {}
+        src_biz = int(req.get("src_bk_biz_id") or 0)
+        dst_biz = int(req.get("dst_bk_biz_id") or 0)
+        dst_module = int(req.get("bk_module_id") or 0)
+        host_ids = req.get("bk_host_id") or req.get("bk_host_ids") or []
+        if isinstance(host_ids, int):
+            host_ids = [host_ids]
+        host_ids = [int(h) for h in host_ids]
+
+        if not src_biz:
+            return make_response(result=False, code=400, message="缺少 src_bk_biz_id（源业务）")
+        if not dst_biz:
+            return make_response(result=False, code=400, message="缺少 dst_bk_biz_id（目标业务）")
+        if not dst_module:
+            return make_response(result=False, code=400, message="缺少 bk_module_id（目标模块）")
+        if not host_ids:
+            return make_response(result=False, code=400, message="缺少 bk_host_id")
+
+        # 校验目标模块归属目标业务（对话框 topo/internal 现已正确返回目标业务自身空闲机池，
+        # bk_module_id 应属于 dst_biz；若越界则拒绝，避免脏数据）
+        mod = conn.cc_ModuleBase.find_one({"bk_module_id": dst_module})
+        if not mod or int(mod.get("bk_biz_id") or 0) != dst_biz:
+            return make_response(result=False, code=400,
+                                 message="目标模块不存在或不属于目标业务 dst_bk_biz_id")
+        target_set_id = mod.get("bk_set_id")
+
+        # 资源池业务不可作为目标（那是归还主机池语义，应走 hosts/modules/resource）
+        rp = conn.cc_ApplicationBase.find_one({"default": 1}) or \
+            conn.cc_ApplicationBase.find_one({"bk_biz_id": {"$ne": None}})
+        owner_app = int(rp.get("bk_biz_id")) if rp else 0
+        if dst_biz == owner_app:
+            return make_response(result=False, code=400,
+                                 message="目标业务为资源池，请使用「归还主机池」操作")
+        if not conn.cc_ApplicationBase.find_one({"bk_biz_id": dst_biz}):
+            return make_response(result=False, code=400, message="目标业务不存在")
+
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        moved = 0
+        for hid in host_ids:
+            hid = int(hid)
+            # 删除该主机在【源业务】下的全部模块关系（彻底离开源业务）
+            conn.cc_ModuleHostConfig.delete_many({"bk_host_id": hid, "bk_biz_id": src_biz})
+            # 在目标业务写入目标模块关系（幂等 upsert）
+            conn.cc_ModuleHostConfig.update_one(
+                {"bk_host_id": hid, "bk_module_id": dst_module, "bk_biz_id": dst_biz},
+                {"$set": {"bk_set_id": target_set_id, "bk_biz_id": dst_biz,
+                          "bk_module_id": dst_module, "bk_supplier_account": "0",
+                          "last_time": now}},
+                upsert=True)
+            moved += 1
+
+        return make_response(data={"bk_module_id": dst_module, "moved": moved})
     except Exception as e:
         import traceback
         traceback.print_exc()

@@ -492,6 +492,22 @@ def user_logout():
 @user_bp.route('/proxy/user/list', methods=['POST'])
 @user_bp.route('/user/list', methods=['GET', 'POST'])
 def user_list():
+    """获取用户列表 —— 运维人员/开发人员选择组件的数据源。
+
+    前端「资源 → 业务 → 创建业务」表单中的运维人员(bk_operator)、
+    开发人员(bk_biz_developer) 字段使用 <user-selector> 组件，打开下拉时
+    调用 ``GET /api/v3/user/list?fuzzy_lookups=<关键词>`` 拉取候选人员，
+    并对返回数组逐项映射为：
+        ``{ username: e.english_name, display_name: e.chinese_name }``
+
+    与 bk-cmdb Go 端 ``web_server.GetUserList`` 的响应契约对齐：
+        ``{ bk_error_code, result, code, message,
+            data: [ {chinese_name, english_name}, ... ] }``
+
+    数据源优先级：
+        1) 若 MongoDB 已存在 ``users`` 集合且有文档，则以其为准（去除密码等敏感字段）；
+        2) 否则回退到 ``Config.DEFAULT_USERS`` 内置演示账户（最小依赖部署无外部用户目录）。
+    """
     try:
         conn = get_db_connection()
         if conn is None:
@@ -507,41 +523,53 @@ def user_list():
             req_data = request.form.to_dict()
         elif request.data:
             try:
-                import json
                 req_data = json.loads(request.data)
             except Exception:
                 req_data = {}
-        page = req_data.get('page', {}) if isinstance(req_data.get('page'), dict) else {}
-        start = int(page.get('start', 0) or 0)
-        limit = int(page.get('limit', 10) or 10)
-        fuzzy = str(req_data.get('fuzzy_lookups') or req_data.get('fuzzy_lookups') or '').strip().lower()
+        fuzzy = str(req_data.get('fuzzy_lookups', '') or '').strip().lower()
 
-        # 最小系统无独立用户目录，以内置超级管理员 admin 作为唯一账户兜底
-        admin_user = {
-            "bk_username": Config.ADMIN_USERNAME,
-            "username": Config.ADMIN_USERNAME,
-            "bk_role": 1,
-            "role": "admin",
-            "language": "zh",
-        }
-        users = list(conn.users.find())
-        for u in users:
-            u.pop('_id', None)
-            u.pop('password', None)
-        if not users:
-            users = [admin_user]
+        # 1) 优先读取 MongoDB users 集合（若存在）
+        raw_users = []
+        try:
+            for u in conn.users.find():
+                u.pop('_id', None)
+                u.pop('password', None)
+                u.pop('bk_password', None)
+                raw_users.append(u)
+        except Exception:
+            raw_users = []
 
-        # 模糊匹配（bk-cmdb 行为）
+        # 2) 回退到内置演示账户（最小依赖部署）
+        if not raw_users:
+            raw_users = [dict(u) for u in Config.DEFAULT_USERS]
+
+        # 归一化：确保选择器映射所需的 english_name / chinese_name 字段存在
+        users = []
+        for u in raw_users:
+            en = str(u.get('english_name') or u.get('en_name')
+                     or u.get('username') or u.get('bk_username') or '').strip()
+            cn = str(u.get('chinese_name') or u.get('cn_name')
+                     or u.get('bk_username') or en).strip()
+            if not en and not cn:
+                continue
+            users.append({
+                "english_name": en or cn,
+                "chinese_name": cn or en,
+                "username": str(u.get('username') or u.get('bk_username') or en or cn),
+                "role": str(u.get('role') or u.get('bk_role') or 'user'),
+            })
+
+        # 模糊匹配（bk-cmdb 行为：english_name / chinese_name / username 子串，忽略大小写）
         if fuzzy:
             users = [
                 u for u in users
-                if fuzzy in str(u.get('bk_username', '')).lower()
+                if fuzzy in str(u.get('english_name', '')).lower()
+                or fuzzy in str(u.get('chinese_name', '')).lower()
                 or fuzzy in str(u.get('username', '')).lower()
             ]
 
-        count = len(users)
-        paged = users[start:start + limit] if limit else users
-        return make_response(data={"count": count, "info": paged})
+        # 与 Go GetUserList 一致：data 直接为人员数组（前端选择器对 data 做 .map）
+        return make_response(data=users)
     except Exception as e:
         return make_response(result=False, code=500, message=str(e))
 

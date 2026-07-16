@@ -1,6 +1,6 @@
 """UI 服务（prod_bin 前端 + 登录 + /api/v3 反向代理）
 
-一个独立的 Flask 服务，作为「完整的 CMDB 系统」的前端入口（与 BFF 无关）：
+一个独立的 Flask 服务，作为「完整的 CMDB 系统」的前端入口：
 
   - 托管 prod_bin/ui 静态资源（/static/*）
   - 渲染 index.html / login.html 两个 Go 模板（注入 window.Site/User/Supplier/ESB）

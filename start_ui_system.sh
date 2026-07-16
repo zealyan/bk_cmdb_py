@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
 #
-# start_ui_system.sh — 启动「完整的 CMDB 系统」（BFF 无关、最小依赖）
+# start_ui_system.sh — 启动「完整的 CMDB 系统」（最小依赖）
 #
 #   依赖：MongoDB（已有 cmdb 实例 + initdb 原生数据）
 #   服务：cmdb_server_py (app.py :3000) + UI 服务 (ui_server.py :8085)
-#   说明：本脚本与 run_stack.sh（Go 全栈 + BFF）相互独立，不拉起任何 Go 服务 / ZooKeeper / Redis。
+#   说明：最小依赖，仅拉起 MongoDB + app.py + ui_server.py，不拉起任何 Go 服务 / ZooKeeper / Redis。
 #
 # 登录：内置管理员 admin / admin（与 bk-cmdb common.yaml webServer.session.userInfo 对齐）
 #
 set -uo pipefail
 
-BFF_DIR=/workspace/bk_cmdb_py/cmdb_server_py
+BACKEND_DIR=/workspace/bk_cmdb_py/cmdb_server_py
 PROD_UI=/workspace/bk_cmdb_py/prod_bin/ui
 PY_BIN=$(ls /root/.pyenv/versions/*/bin/python3.11 2>/dev/null | head -1)
 PY_BIN="${PY_BIN:-python3.11}"
@@ -42,7 +42,7 @@ fi
 echo "[$(date '+%F %T')] 启动 app.py (:${APP_PORT})..."
 fuser -k ${APP_PORT}/tcp 2>/dev/null || true
 sleep 1
-( cd "$BFF_DIR" && \
+( cd "$BACKEND_DIR" && \
   MONGODB_URI="mongodb://cc:cc@127.0.0.1:27017/cmdb?authSource=cmdb" \
   MONGODB_DB="cmdb" SKIP_LOGIN=false \
   setsid nohup "$PY_BIN" app.py > /tmp/cmdb_py_app.log 2>&1 & )
@@ -55,7 +55,7 @@ curl -fsS -o /dev/null "http://127.0.0.1:${APP_PORT}/health" --max-time 5 \
 echo "[$(date '+%F %T')] 启动 UI 服务 (:${UI_PORT})..."
 fuser -k ${UI_PORT}/tcp 2>/dev/null || true
 sleep 1
-( cd "$BFF_DIR" && \
+( cd "$BACKEND_DIR" && \
   UI_PORT="${UI_PORT}" BACKEND_URL="${BACKEND_URL}" PROD_UI_DIR="${PROD_UI}" \
   setsid nohup "$PY_BIN" ui_server.py > /tmp/cmdb_py_ui.log 2>&1 & )
 sleep 4

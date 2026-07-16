@@ -173,6 +173,18 @@ class ObjectDesMigrate(BaseMigrate):
             "last_time": get_timestamp(),
             "bk_supplier_account": BK_DEFAULT_OWNER_ID,
         },
+        {
+            "bk_obj_id": "bk_biz_set_obj",
+            "bk_obj_name": "业务集",
+            "bk_classification_id": "bk_organization",
+            "bk_obj_icon": "icon-cc-business-set",
+            "position": "",
+            "ispre": True,
+            "creator": BK_SYSTEM_OPERATOR,
+            "create_time": get_timestamp(),
+            "last_time": get_timestamp(),
+            "bk_supplier_account": BK_DEFAULT_OWNER_ID,
+        },
     ]
 
     def migrate(self) -> None:

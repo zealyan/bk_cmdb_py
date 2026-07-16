@@ -6,6 +6,7 @@
 """
 
 from .. import BaseMigrate, get_timestamp, BK_DEFAULT_OWNER_ID, BK_SYSTEM_OPERATOR
+from .graph import GraphMigrate, run_graph_migrate
 
 
 class ObjectUniqueMigrate(BaseMigrate):
@@ -186,18 +187,40 @@ class IDGeneratorMigrate(BaseMigrate):
         "cc_ChartConfig": 8,
     }
 
+    # 各集合的主键 ID 字段（IDGeneratorMigrate 据此计算 SequenceID 实际最大值）。
+    # 关键修复：内置业务/集群/模块文档使用 bk_biz_id/bk_set_id/bk_module_id 而非 id 字段，
+    # 旧实现只读 id 字段导致这些集合 SequenceID 被算成 0，seed 从 1 起与内置数据碰撞。
+    ID_FIELDS = {
+        "cc_ObjClassification": "id",
+        "cc_PropertyGroup": "id",
+        "cc_ObjDes": "id",
+        "cc_ObjAttDes": "id",
+        "cc_ObjAsst": "id",
+        "cc_AsstDes": "id",
+        "cc_ObjectUnique": "id",
+        "cc_ServiceCategory": "id",
+        "cc_AuditLog": "id",
+        "cc_ChartConfig": "id",
+        "cc_PlatBase": "bk_cloud_id",
+        "cc_ApplicationBase": "bk_biz_id",
+        "cc_SetBase": "bk_set_id",
+        "cc_ModuleBase": "bk_module_id",
+        "cc_BizSetBase": "bk_biz_set_id",
+    }
+
     def migrate(self) -> None:
         self.ensure_collection("cc_idgenerator")
         ts = get_timestamp()
         for name, base in self.SEQUENCE_BASES.items():
-            if base is None:
+            field = self.ID_FIELDS.get(name, "id")
+            if base is not None:
+                seq = base
+            else:
                 seq = 0
                 if name in self.db.list_collection_names():
-                    doc = self.db[name].find_one(sort=[("id", -1)])
-                    if doc and "id" in doc:
-                        seq = doc["id"]
-            else:
-                seq = base
+                    doc = self.db[name].find_one(sort=[(field, -1)])
+                    if doc and field in doc and isinstance(doc.get(field), int):
+                        seq = doc[field]
             self.db["cc_idgenerator"].update_one(
                 {"_id": name},
                 {"$set": {"_id": name, "SequenceID": seq, "create_time": ts, "last_time": ts}},
@@ -211,6 +234,7 @@ def run_default_data_migrate(db) -> None:
         BizSetMigrate(db),
         DefaultBusinessMigrate(db),
         IDGeneratorMigrate(db),
+        GraphMigrate(db),
     ]
     for m in migrations:
         print(f"Running migration: {m.__class__.__name__}")

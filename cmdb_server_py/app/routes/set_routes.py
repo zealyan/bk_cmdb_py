@@ -127,7 +127,7 @@ def create_set(biz_id):
                     results.append({"error_message": str(ex)})
             return make_response(data=results)
 
-        # 单对象形态：兼容直接调用 / 集成态
+        # 单对象形态：兼容直接调用
         bk_set_name = req_data.get('bk_set_name')
         if not bk_set_name:
             return make_response(result=False, code=400, message="集群名称不能为空")

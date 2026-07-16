@@ -77,6 +77,77 @@ def next_id(db, coll_name):
     return Int64(doc["SequenceID"])
 
 
+def inst_collection_name(obj_id):
+    """自定义/通用对象实例集合命名（对齐 common/tablenames.go GetInstTableName）：
+    cc_ObjectBase_<supplierAccount>_pub_<bkObjID>。仅自定义主线层（如 appsys）用到。"""
+    return f"cc_ObjectBase_0_pub_{obj_id}"
+
+
+def get_mainline_chain(db):
+    """推导有序主线链 [根..叶]（与 bk-cmdb 主线链推导一致）。"""
+    assts = list(db.cc_ObjAsst.find(
+        {"bk_asst_id": "bk_mainline", "bk_supplier_account": "0"},
+        {"bk_obj_id": 1, "bk_asst_obj_id": 1, "_id": 0}))
+    if not assts:
+        return ["biz", "set", "module", "host"]
+    child_to_parent = {}
+    for a in assts:
+        c, p = a.get("bk_obj_id"), a.get("bk_asst_obj_id")
+        if c and p:
+            child_to_parent[c] = p
+    roots = set(child_to_parent.values()) - set(child_to_parent.keys())
+    if not roots:
+        return ["biz", "set", "module", "host"]
+    cur = list(roots)[0]
+    chain, seen = [], set()
+    while cur and cur not in seen:
+        chain.append(cur)
+        seen.add(cur)
+        cur = child_to_parent.get(cur)
+    return chain or ["biz", "set", "module", "host"]
+
+
+def create_mainline_insts_for_biz(db, biz_id):
+    """为新建业务补齐『biz 与 set 之间』的自定义主线层实例（如 appsys），
+    使业务拓扑在新主线（biz→appsys→set→…）下能正确渲染。
+
+    背景：本仓库已在「模型关系」插入 appsys 自定义主线层，
+    新建业务的 set 必须把 bk_parent_id 指向 appsys 实例，而非直接指向 biz，
+    否则该业务拓扑在『业务拓扑』页会因主线层错位而不可见。
+    返回 set 应挂载的父实例 id（即最末一个自定义主线层实例 id）。
+    """
+    chain = get_mainline_chain(db)
+    parent_id = biz_id
+    for obj in chain[1:]:
+        if obj == "set":
+            break
+        coll_name = inst_collection_name(obj)
+        inst_id = next_id(db, coll_name)
+        meta = db.cc_ObjDes.find_one(
+            {"bk_obj_id": obj, "bk_supplier_account": "0"},
+            {"bk_obj_name": 1, "_id": 0}) or {}
+        inst_name = meta.get("bk_obj_name") or obj
+        t = now_iso()
+        db[coll_name].insert_one({
+            "bk_inst_id": inst_id,
+            "bk_inst_name": inst_name,
+            "bk_obj_id": obj,
+            "bk_biz_id": biz_id,
+            "bk_parent_id": parent_id,
+            "bk_supplier_account": "0",
+            "bk_ispaused": False,
+            "bk_ishidden": False,
+            "default": 0,
+            "creator": "admin",
+            "create_time": t,
+            "last_time": t,
+            "description": "",
+        })
+        print(f"  [主线实例] obj={obj} bk_inst_id={inst_id} name={inst_name} (parent={parent_id})")
+        parent_id = inst_id
+    return parent_id
+
+
 def seed_business(db):
     biz_id = next_id(db, "cc_ApplicationBase")
     t = now_iso()
@@ -101,13 +172,15 @@ def seed_business(db):
     return biz_id
 
 
-def seed_set(db, biz_id):
+def seed_set(db, biz_id, parent_id=None):
     set_id = next_id(db, "cc_SetBase")
     t = now_iso()
+    if parent_id is None:
+        parent_id = biz_id
     doc = {
         "bk_set_id": set_id,
         "bk_biz_id": biz_id,
-        "bk_parent_id": biz_id,
+        "bk_parent_id": parent_id,
         "bk_set_name": SEED_SET_NAME,
         "bk_set_env": "3",
         "bk_service_status": "1",
@@ -264,7 +337,10 @@ def main():
         seed_hosts(db, biz_id, set_id, module_id, start=start)
     else:
         biz_id = seed_business(db)
-        set_id = seed_set(db, biz_id)
+        # 补齐 biz 与 set 之间的自定义主线层实例（如 appsys），
+        # 返回 set 应挂载的父实例 id，保证新主线(biz→appsys→set)下拓扑正确渲染。
+        set_parent = create_mainline_insts_for_biz(db, biz_id)
+        set_id = seed_set(db, biz_id, parent_id=set_parent)
         module_id = seed_module(db, biz_id, set_id)
         seed_hosts(db, biz_id, set_id, module_id)
 

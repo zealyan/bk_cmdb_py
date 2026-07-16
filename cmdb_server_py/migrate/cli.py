@@ -21,6 +21,7 @@ from migrate.data.attributes import run_attribute_migrate
 from migrate.data.associations import run_association_migrate
 from migrate.data.association_types import run_association_type_migrate
 from migrate.data.service_categories import run_service_category_migrate
+from migrate.data.default_data import run_default_data_migrate
 
 
 MONGO_URI = os.environ.get("MONGO_URI", "mongodb://localhost:27017")
@@ -85,6 +86,7 @@ def cmd_all(db):
     run_association_migrate(db)
     run_association_type_migrate(db)
     run_service_category_migrate(db)
+    run_default_data_migrate(db)
     print("\nAll migrations completed!")
 
 

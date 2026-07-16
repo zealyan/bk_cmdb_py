@@ -33,6 +33,7 @@ Usage:
 """
 
 import os
+import json
 
 
 class Config:
@@ -94,6 +95,31 @@ class Config:
     # 仅作为运行时鉴权兜底，不写入 MongoDB（项目只保留 initdb 原生数据）。
     ADMIN_USERNAME = os.environ.get('ADMIN_USERNAME', 'admin')
     ADMIN_PASSWORD = os.environ.get('ADMIN_PASSWORD', 'admin')
+
+    # 内置演示用户（最小依赖部署下无外部用户目录/IAM 时使用）。
+    # 前端「创建业务」表单的运维人员(bk_operator)/开发人员(bk_biz_developer)
+    # 选择组件经 GET /api/v3/user/list 拉取候选，逐项正确映射为
+    #   { username: english_name, display_name: chinese_name }
+    # 与 bk-cmdb Go 端 web_server GetUserList 返回的
+    #   LoginSystemUserInfo{ CnName->chinese_name, EnName->english_name } 对齐。
+    # 可通过环境变量 CMDB_DEFAULT_USERS 以 JSON 数组覆盖（例如：
+    #   '[{"english_name":"alice","chinese_name":"爱丽丝","role":"user"}]'）。
+    _default_users_json = os.environ.get('CMDB_DEFAULT_USERS', '')
+    if _default_users_json:
+        try:
+            DEFAULT_USERS = json.loads(_default_users_json)
+        except Exception:
+            DEFAULT_USERS = None
+    else:
+        DEFAULT_USERS = None
+    if not DEFAULT_USERS:
+        DEFAULT_USERS = [
+            {"english_name": "admin", "chinese_name": "管理员", "username": "admin", "role": "admin"},
+            {"english_name": "ops01", "chinese_name": "运维一号", "username": "ops01", "role": "user"},
+            {"english_name": "ops02", "chinese_name": "运维二号", "username": "ops02", "role": "user"},
+            {"english_name": "dev01", "chinese_name": "开发一号", "username": "dev01", "role": "user"},
+            {"english_name": "dev02", "chinese_name": "开发二号", "username": "dev02", "role": "user"},
+        ]
 
     @classmethod
     def is_superuser(cls, username) -> bool:
