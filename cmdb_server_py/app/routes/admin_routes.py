@@ -1848,6 +1848,7 @@ def create_service_category():
             except:
                 req_data = {}
         
+        conn = get_db_connection()
         bk_biz_id = req_data.get('bk_biz_id', 0)
         name = req_data.get('name', '').strip()
         bk_parent_id = req_data.get('bk_parent_id', req_data.get('parent_id', 0))
