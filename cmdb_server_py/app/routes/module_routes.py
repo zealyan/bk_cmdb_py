@@ -76,7 +76,7 @@ def create_module(biz_id, set_id):
             "bk_supplier_account": bk_supplier_account,
             "bk_parent_id": set_id,
             "bk_parent_obj": "set",
-            "bk_service_category_id": req_data.get('bk_service_category_id', 1),
+            "bk_service_category_id": req_data.get('bk_service_category_id', req_data.get('service_category_id', 1)),
             "create_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "last_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "bk_data_status": "enabled",
@@ -211,9 +211,14 @@ def update_module(biz_id, set_id, module_id):
             "last_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         }
         
-        for field in ["bk_module_name", "bk_service_category_id"]:
-            if field in req_data and req_data[field] is not None:
-                update_fields[field] = req_data[field]
+        # 服务分类字段：前端编辑模块表单使用 service_category_id，
+        # 存储字段为 bk_service_category_id（对齐 cc_ModuleBase）。两者都接受。
+        svc_cat = req_data.get("bk_service_category_id", req_data.get("service_category_id"))
+        if svc_cat is not None:
+            update_fields["bk_service_category_id"] = svc_cat
+        
+        if "bk_module_name" in req_data and req_data["bk_module_name"] is not None:
+            update_fields["bk_module_name"] = req_data["bk_module_name"]
         
         result = conn.cc_ModuleBase.update_one(
             {
