@@ -2072,10 +2072,16 @@ def create_instance(obj_id):
         req_data = _parse_body()
         cid = _create_one_instance(obj_id, req_data)
         id_field = get_inst_id_field(obj_id)
+        # 前端 topology-tree.vue handleCreateNode 把响应直接合并进树节点，
+        # createCommonInstance 显式读取 data.bk_inst_id / data.bk_inst_name 用于显示名称。
+        # 因此响应必须同时返回 bk_inst_id 与 bk_inst_name，否则新建节点不显示名称
+        # （仅返回 id 会导致 topo 树节点名称缺失）。
+        name_field = get_inst_name_field(obj_id)
         return make_response(data={
             "bk_inst_id": cid,
             id_field: cid,
             "id": cid,
+            "bk_inst_name": req_data.get(name_field),
         })
     except _InstanceCreateError as e:
         return make_response(result=False, code=500, message=e.message)
@@ -2101,6 +2107,7 @@ def batch_create_instance(obj_id):
         items = req.get("instances") or req.get("data") or []
         if not isinstance(items, list):
             items = [req]
+        name_field = get_inst_name_field(obj_id)
         created, errors = [], []
         for idx, item in enumerate(items):
             if not isinstance(item, dict):
@@ -2108,7 +2115,9 @@ def batch_create_instance(obj_id):
                 continue
             try:
                 cid = _create_one_instance(obj_id, item)
-                created.append({"index": idx, "bk_inst_id": cid, "id": cid})
+                # 与单条创建一致，返回 bk_inst_name 供前端拓扑节点显示名称
+                created.append({"index": idx, "bk_inst_id": cid, "id": cid,
+                                "bk_inst_name": item.get(name_field)})
             except _InstanceCreateError as e:
                 errors.append({"index": idx, "message": e.message})
         return make_response(data={"info": created, "error": errors})
