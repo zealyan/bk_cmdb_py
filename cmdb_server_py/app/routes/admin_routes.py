@@ -146,6 +146,36 @@ def _build_host_search_query(conn, req_data):
             rel_query["bk_module_id"] = {"$in": mod_ids}
             mod_biz = mod_docs[0].get("bk_biz_id")
 
+    # 自定义主线对象条件（如 appsys）：前端 host-list.vue getParams 对自定义主线模型
+    # 统一以 bk_obj_id="object" + {field:"bk_inst_id", value:N} 下发。需沿主线链把该实例
+    # 解析为其下游所有 module，再经 cc_ModuleHostConfig 反查主机——对齐 Go
+    # scene_server/host_server/logics/object.go GetSetIDByObjectCond + hostsearch.go
+    # searchByMainline / searchByModule。缺失此分支会导致该节点返回业务下“全部主机”。
+    obj_cond = next((c for c in conditions if c.get("bk_obj_id") == "object"), None)
+    if obj_cond and obj_cond.get("condition"):
+        inst_id = None
+        for f in obj_cond["condition"]:
+            if f.get("field") == "bk_inst_id":
+                inst_id = f.get("value")
+                break
+        if inst_id is not None:
+            try:
+                inst_id = int(inst_id)
+            except (TypeError, ValueError):
+                inst_id = None
+            if inst_id is not None:
+                supplier = req_data.get("bk_supplier_account") or "0"
+                eff_biz = bk_biz_id if (isinstance(bk_biz_id, int) and bk_biz_id > 0) else None
+                resolved = _resolve_mainline_object_condition(conn, supplier, eff_biz, inst_id) if eff_biz else []
+                if resolved:
+                    exist = set(rel_query.get("bk_module_id", {}).get("$in", []))
+                    rel_query["bk_module_id"] = {"$in": list(exist | set(resolved))}
+                else:
+                    # 无下游 module => 该节点下无任何主机（返回空，而非“全部主机”）
+                    rel_query["bk_module_id"] = {"$in": []}
+                if eff_biz and "bk_biz_id" not in rel_query:
+                    rel_query["bk_biz_id"] = eff_biz
+
     # 业务取值范围优先级：set/module 真实归属业务 > 请求中的 bk_biz_id。
     # 仅在没有 set/module 条件收窄时，才直接使用请求的 bk_biz_id（如主机管理按业务搜索）。
     scope_biz = set_biz if set_biz is not None else mod_biz
@@ -183,6 +213,74 @@ def _build_host_search_query(conn, req_data):
             host_q["bk_host_id"] = {"$in": candidate_ids}
 
     return host_q
+
+
+def _resolve_mainline_object_to_module_ids(conn, supplier, bk_biz_id, obj_id, inst_id):
+    """沿主线链从 obj_id 实例向下遍历到 module，收集其下游所有 module id。
+
+    对齐 Go scene_server/host_server/logics/object.go GetSetIDByObjectCond +
+    hostsearch.go searchByMainline/searchByModule：把自定义主线对象实例（如 appsys-12）
+    解析为其下游所有 set -> module，最终用于反查主机。
+
+    注意：主线各层使用不同的实例主键字段（biz->bk_biz_id、set->bk_set_id、
+    module->bk_module_id、自定义对象->bk_inst_id），故每级按 get_inst_id_field 读取，
+    但父子挂接统一用 bk_parent_id（存父级在其主键字段中的值）。
+    """
+    from app.routes.object_routes import (get_mainline_chain, get_inst_collection_name,
+                                          get_inst_id_field)
+    chain = get_mainline_chain(supplier)
+    if obj_id not in chain:
+        return []
+    idx = chain.index(obj_id)
+    cur_ids = {inst_id}
+    for o in chain[idx + 1:]:
+        id_field = get_inst_id_field(o)
+        if o == "module":
+            mods = list(conn.cc_ModuleBase.find(
+                {"bk_biz_id": bk_biz_id, "bk_parent_id": {"$in": list(cur_ids)},
+                 "bk_data_status": {"$ne": "disabled"}},
+                {id_field: 1, "_id": 0}))
+            return [m[id_field] for m in mods]
+        coll = conn[get_inst_collection_name(o)]
+        docs = list(coll.find(
+            {"bk_biz_id": bk_biz_id, "bk_parent_id": {"$in": list(cur_ids)}},
+            {id_field: 1, "_id": 0}))
+        cur_ids = {d[id_field] for d in docs}
+        if not cur_ids:
+            return []
+    return []
+
+
+def _resolve_mainline_object_condition(conn, supplier, bk_biz_id, inst_id):
+    """把前端 object 条件（bk_inst_id）解析为下游 module id 列表。
+
+    前端对自定义主线对象统一以 bk_obj_id="object" 下发，真实对象需由 inst_id 推断
+    （对齐 Go GetInstanceObjectMapping）：先在主线链中的自定义对象（非 biz/set/module/host）
+    定位 inst_id 归属对象，再向下解析到 module。
+    """
+    from app.routes.object_routes import get_mainline_chain, get_inst_collection_name
+    if not bk_biz_id:
+        return []
+    chain = get_mainline_chain(supplier)
+    custom_objs = [o for o in chain if o not in ("biz", "set", "module", "host")]
+    obj_id = None
+    for o in custom_objs:
+        coll = conn[get_inst_collection_name(o)]
+        if coll.find_one({"bk_inst_id": inst_id, "bk_biz_id": bk_biz_id}, {"_id": 1}):
+            obj_id = o
+            break
+    if obj_id is None:
+        # 兜底：遍历主线全部对象（跳过 biz/host）定位 inst_id 归属
+        for o in chain:
+            if o in ("biz", "host"):
+                continue
+            coll = conn[get_inst_collection_name(o)]
+            if coll.find_one({"bk_inst_id": inst_id, "bk_biz_id": bk_biz_id}, {"_id": 1}):
+                obj_id = o
+                break
+    if obj_id is None:
+        return []
+    return _resolve_mainline_object_to_module_ids(conn, supplier, bk_biz_id, obj_id, inst_id)
 
 
 def _normalize_host_doc(doc):
